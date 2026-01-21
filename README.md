@@ -157,7 +157,6 @@ Complete working examples in the `examples/` directory:
 |---------|-------------|
 | [openai-client](examples/openai-client) | OpenAI/Ollama client usage |
 | [anthropic-client](examples/anthropic-client) | Anthropic Claude client usage |
-| [ollama-agents](examples/ollama-agents) | Basic ADK agent with Ollama |
 | [session-memory](examples/session-memory) | Session management with Redis |
 | [long-term-memory](examples/long-term-memory) | Long-term memory with PostgreSQL + pgvector |
 | [full-memory](examples/full-memory) | Combined session + long-term memory |
