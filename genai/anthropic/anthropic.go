@@ -257,7 +257,13 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 				return nil, fmt.Errorf("failed to marshal function args: %w", err)
 			}
 			var input map[string]any
-			json.Unmarshal(inputJSON, &input)
+			if err := json.Unmarshal(inputJSON, &input); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal function args: %w", err)
+			}
+			// Ensure input is never nil - Anthropic requires a valid dictionary
+			if input == nil {
+				input = make(map[string]any)
+			}
 
 			blocks = append(blocks, anthropic.ContentBlockParamUnion{
 				OfToolUse: &anthropic.ToolUseBlockParam{
