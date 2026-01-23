@@ -352,6 +352,8 @@ func (m *Model) convertTools(genaiTools []*genai.Tool) ([]anthropic.ToolUnionPar
 			}
 
 			var inputSchema anthropic.ToolInputSchemaParam
+			// Type is required by Anthropic API, must be "object"
+			inputSchema.Type = "object"
 			if params != nil {
 				if m, ok := params.(map[string]any); ok {
 					if props, ok := m["properties"]; ok {
