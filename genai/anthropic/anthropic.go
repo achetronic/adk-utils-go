@@ -16,11 +16,15 @@ package anthropic
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
+	"regexp"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -33,6 +37,9 @@ var _ model.LLM = &Model{}
 var (
 	ErrNoContentInResponse = errors.New("no content in Anthropic response")
 )
+
+// anthropicToolIDPattern matches valid Anthropic tool_use IDs: ^[a-zA-Z0-9_-]+$
+var anthropicToolIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // Model implements model.LLM using the official Anthropic Go SDK.
 type Model struct {
@@ -50,7 +57,7 @@ type Config struct {
 	ModelName string
 }
 
-// New creates a new Model with the given configuration.
+// New creates an Anthropic client from config (API key, base URL, model name).
 func New(cfg Config) *Model {
 	opts := []option.RequestOption{}
 
@@ -69,12 +76,12 @@ func New(cfg Config) *Model {
 	}
 }
 
-// Name implements model.LLM.
+// Name returns the model name (e.g. "claude-sonnet-4-5-20250929").
 func (m *Model) Name() string {
 	return m.modelName
 }
 
-// GenerateContent implements model.LLM.
+// GenerateContent sends the request to Anthropic and returns responses (streaming or single).
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if stream {
 		return m.generateStream(ctx, req)
@@ -82,6 +89,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	return m.generate(ctx, req)
 }
 
+// generate sends a single request and yields one complete response.
 func (m *Model) generate(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		params, err := m.buildMessageParams(req)
@@ -106,6 +114,7 @@ func (m *Model) generate(ctx context.Context, req *model.LLMRequest) iter.Seq2[*
 	}
 }
 
+// generateStream sends a request and yields partial responses as they arrive, then a final complete one.
 func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		params, err := m.buildMessageParams(req)
@@ -163,6 +172,7 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 	}
 }
 
+// buildMessageParams converts an LLMRequest into Anthropic's API format (system prompt, messages, tools, config).
 func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewParams, error) {
 	// Default max tokens (required by Anthropic API)
 	maxTokens := int64(4096)
@@ -196,6 +206,11 @@ func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewP
 			messages = append(messages, *msg)
 		}
 	}
+
+	// Repair message history to comply with Anthropic's requirements
+	// (each tool_use must have a corresponding tool_result immediately after)
+	messages = repairMessageHistory(messages)
+
 	params.Messages = messages
 
 	// Apply config settings
@@ -223,6 +238,7 @@ func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewP
 	return params, nil
 }
 
+// convertContentToMessage transforms a genai.Content (text, images, tool calls/results) into an Anthropic message.
 func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.MessageParam, error) {
 	role := convertRoleToAnthropic(content.Role)
 
@@ -252,24 +268,11 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 		}
 
 		if part.FunctionCall != nil {
-			inputJSON, err := json.Marshal(part.FunctionCall.Args)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal function args: %w", err)
-			}
-			var input map[string]any
-			if err := json.Unmarshal(inputJSON, &input); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal function args: %w", err)
-			}
-			// Ensure input is never nil - Anthropic requires a valid dictionary
-			if input == nil {
-				input = make(map[string]any)
-			}
-
 			blocks = append(blocks, anthropic.ContentBlockParamUnion{
 				OfToolUse: &anthropic.ToolUseBlockParam{
-					ID:    part.FunctionCall.ID,
+					ID:    sanitizeToolID(part.FunctionCall.ID),
 					Name:  part.FunctionCall.Name,
-					Input: input,
+					Input: convertToolInput(part.FunctionCall.Args),
 				},
 			})
 		}
@@ -279,7 +282,7 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)
 			}
-			blocks = append(blocks, anthropic.NewToolResultBlock(part.FunctionResponse.ID, string(responseJSON), false))
+			blocks = append(blocks, anthropic.NewToolResultBlock(sanitizeToolID(part.FunctionResponse.ID), string(responseJSON), false))
 		}
 	}
 
@@ -287,22 +290,10 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 		return nil, nil
 	}
 
-	switch role {
-	case anthropic.MessageParamRoleUser:
-		return &anthropic.MessageParam{
-			Role:    anthropic.MessageParamRoleUser,
-			Content: blocks,
-		}, nil
-	case anthropic.MessageParamRoleAssistant:
-		return &anthropic.MessageParam{
-			Role:    anthropic.MessageParamRoleAssistant,
-			Content: blocks,
-		}, nil
-	}
-
-	return nil, nil
+	return &anthropic.MessageParam{Role: role, Content: blocks}, nil
 }
 
+// convertResponse transforms Anthropic's response (text, tool_use blocks, usage) into the generic LLMResponse.
 func (m *Model) convertResponse(resp *anthropic.Message) (*model.LLMResponse, error) {
 	content := &genai.Content{
 		Role:  genai.RoleModel,
@@ -343,6 +334,7 @@ func (m *Model) convertResponse(resp *anthropic.Message) (*model.LLMResponse, er
 	}, nil
 }
 
+// convertTools transforms genai tool definitions into Anthropic's tool format (name, description, JSON schema).
 func (m *Model) convertTools(genaiTools []*genai.Tool) ([]anthropic.ToolUnionParam, error) {
 	var tools []anthropic.ToolUnionParam
 
@@ -384,6 +376,7 @@ func (m *Model) convertTools(genaiTools []*genai.Tool) ([]anthropic.ToolUnionPar
 	return tools, nil
 }
 
+// convertRoleToAnthropic maps "user"/"model" to Anthropic's role enum (user/assistant).
 func convertRoleToAnthropic(role string) anthropic.MessageParamRole {
 	switch role {
 	case "user":
@@ -395,6 +388,7 @@ func convertRoleToAnthropic(role string) anthropic.MessageParamRole {
 	}
 }
 
+// convertStopReason maps Anthropic's stop reasons (end_turn, max_tokens, tool_use) to genai.FinishReason.
 func convertStopReason(reason anthropic.StopReason) genai.FinishReason {
 	switch reason {
 	case anthropic.StopReasonEndTurn:
@@ -410,6 +404,7 @@ func convertStopReason(reason anthropic.StopReason) genai.FinishReason {
 	}
 }
 
+// convertToolInput ensures tool input is a map[string]any, converting via JSON if needed.
 func convertToolInput(input any) map[string]any {
 	if input == nil {
 		return make(map[string]any)
@@ -429,6 +424,7 @@ func convertToolInput(input any) map[string]any {
 	return result
 }
 
+// extractTextFromContent concatenates all text parts from a genai.Content with newlines.
 func extractTextFromContent(content *genai.Content) string {
 	if content == nil {
 		return ""
@@ -439,22 +435,107 @@ func extractTextFromContent(content *genai.Content) string {
 			texts = append(texts, part.Text)
 		}
 	}
-	return joinTexts(texts)
+	return strings.Join(texts, "\n")
 }
 
-func joinTexts(texts []string) string {
-	if len(texts) == 0 {
-		return ""
+// sanitizeToolID replaces invalid tool IDs (chars outside [a-zA-Z0-9_-]) with a SHA256-based valid ID.
+func sanitizeToolID(id string) string {
+	if anthropicToolIDPattern.MatchString(id) {
+		return id
 	}
-	if len(texts) == 1 {
-		return texts[0]
+
+	// Generate a valid ID from the original using SHA256
+	hash := sha256.Sum256([]byte(id))
+	return "toolu_" + hex.EncodeToString(hash[:16])
+}
+
+// repairMessageHistory removes orphaned tool_use blocks (those without a matching tool_result in the next message).
+func repairMessageHistory(messages []anthropic.MessageParam) []anthropic.MessageParam {
+	if len(messages) == 0 {
+		return messages
 	}
-	result := ""
-	for i, text := range texts {
-		if i > 0 {
-			result += "\n"
+
+	result := make([]anthropic.MessageParam, 0, len(messages))
+
+	for i := 0; i < len(messages); i++ {
+		msg := messages[i]
+
+		// Check if this assistant message has tool_use blocks
+		if msg.Role == anthropic.MessageParamRoleAssistant {
+			toolUseIDs := extractToolUseIDs(msg)
+
+			if len(toolUseIDs) > 0 {
+				// Check if next message is a user message with matching tool_results
+				if i+1 < len(messages) && messages[i+1].Role == anthropic.MessageParamRoleUser {
+					toolResultIDs := extractToolResultIDs(messages[i+1])
+
+					// Find which tool_use IDs have matching tool_results
+					matchedIDs := make(map[string]bool)
+					for _, id := range toolResultIDs {
+						matchedIDs[id] = true
+					}
+
+					// Filter out unmatched tool_use blocks from this message
+					filteredMsg := filterToolUse(msg, matchedIDs)
+					if hasContent(filteredMsg) {
+						result = append(result, filteredMsg)
+					}
+					continue
+				} else {
+					// No following user message with tool_results - remove all tool_use blocks
+					filteredMsg := filterToolUse(msg, nil)
+					if hasContent(filteredMsg) {
+						result = append(result, filteredMsg)
+					}
+					continue
+				}
+			}
 		}
-		result += text
+
+		result = append(result, msg)
 	}
+
 	return result
+}
+
+// extractToolUseIDs returns all tool_use IDs from an assistant message.
+func extractToolUseIDs(msg anthropic.MessageParam) []string {
+	var ids []string
+	for _, block := range msg.Content {
+		if block.OfToolUse != nil {
+			ids = append(ids, block.OfToolUse.ID)
+		}
+	}
+	return ids
+}
+
+// extractToolResultIDs returns all tool_result IDs from a user message.
+func extractToolResultIDs(msg anthropic.MessageParam) []string {
+	var ids []string
+	for _, block := range msg.Content {
+		if block.OfToolResult != nil {
+			ids = append(ids, block.OfToolResult.ToolUseID)
+		}
+	}
+	return ids
+}
+
+// filterToolUse keeps tool_use blocks whose IDs are in allowedIDs. If allowedIDs is nil, removes all tool_use.
+func filterToolUse(msg anthropic.MessageParam, allowedIDs map[string]bool) anthropic.MessageParam {
+	var filteredBlocks []anthropic.ContentBlockParamUnion
+	for _, block := range msg.Content {
+		if block.OfToolUse != nil {
+			if allowedIDs != nil && allowedIDs[block.OfToolUse.ID] {
+				filteredBlocks = append(filteredBlocks, block)
+			}
+			continue
+		}
+		filteredBlocks = append(filteredBlocks, block)
+	}
+	return anthropic.MessageParam{Role: msg.Role, Content: filteredBlocks}
+}
+
+// hasContent returns true if the message has at least one content block.
+func hasContent(msg anthropic.MessageParam) bool {
+	return len(msg.Content) > 0
 }
