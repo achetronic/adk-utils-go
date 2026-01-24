@@ -477,28 +477,60 @@ func (m *Model) convertTools(genaiTools []*genai.Tool) ([]openai.ChatCompletionT
 }
 
 // convertToFunctionParams converts various parameter types to OpenAI format.
+// OpenAI requires object schemas to have a "properties" field, even if empty.
 func convertToFunctionParams(params any) shared.FunctionParameters {
 	if params == nil {
 		return nil
 	}
 
-	// Direct map
-	if m, ok := params.(map[string]any); ok {
-		return shared.FunctionParameters(m)
-	}
-
-	// Convert via JSON for other types (e.g., *jsonschema.Schema)
-	jsonBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil
-	}
-
 	var m map[string]any
-	if json.Unmarshal(jsonBytes, &m) == nil {
-		return shared.FunctionParameters(m)
+
+	// Direct map
+	if dm, ok := params.(map[string]any); ok {
+		m = dm
+	} else {
+		// Convert via JSON for other types (e.g., *jsonschema.Schema)
+		jsonBytes, err := json.Marshal(params)
+		if err != nil {
+			return nil
+		}
+		if json.Unmarshal(jsonBytes, &m) != nil {
+			return nil
+		}
 	}
 
-	return nil
+	// OpenAI requires "properties" for object types
+	ensureObjectProperties(m)
+
+	return shared.FunctionParameters(m)
+}
+
+// ensureObjectProperties recursively ensures all object schemas have a properties field.
+func ensureObjectProperties(schema map[string]any) {
+	if schema == nil {
+		return
+	}
+
+	// If type is "object" and no properties, add empty properties
+	if t, ok := schema["type"].(string); ok && t == "object" {
+		if _, hasProps := schema["properties"]; !hasProps {
+			schema["properties"] = map[string]any{}
+		}
+	}
+
+	// Recursively process nested properties
+	if props, ok := schema["properties"].(map[string]any); ok {
+		for _, prop := range props {
+			if propMap, ok := prop.(map[string]any); ok {
+				ensureObjectProperties(propMap)
+			}
+		}
+	}
+
+	// Process array items
+	if items, ok := schema["items"].(map[string]any); ok {
+		ensureObjectProperties(items)
+	}
 }
 
 // convertSchema recursively converts a genai.Schema to OpenAI JSON schema format.
