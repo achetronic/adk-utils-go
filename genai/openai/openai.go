@@ -463,8 +463,19 @@ func (m *Model) convertTools(genaiTools []*genai.Tool) ([]openai.ChatCompletionT
 
 			var funcParams shared.FunctionParameters
 			if params != nil {
+				// Try direct map[string]any first
 				if m, ok := params.(map[string]any); ok {
 					funcParams = shared.FunctionParameters(m)
+				} else {
+					// Handle other types (e.g., *jsonschema.Schema from ADK functiontool)
+					// by converting via JSON serialization
+					jsonBytes, err := json.Marshal(params)
+					if err == nil {
+						var m map[string]any
+						if json.Unmarshal(jsonBytes, &m) == nil {
+							funcParams = shared.FunctionParameters(m)
+						}
+					}
 				}
 			}
 
