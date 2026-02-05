@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="docs/images/header.svg" alt="adk-utils-go" width="600">
-</p>
+<img src="docs/images/header.svg" alt="adk-utils-go" width="600">
 
 # ADK Utils Go
 
