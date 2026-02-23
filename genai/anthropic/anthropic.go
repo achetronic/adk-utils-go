@@ -250,21 +250,11 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 		}
 
 		if part.InlineData != nil {
-			mediaType := part.InlineData.MIMEType
-			switch mediaType {
-			case "image/jpg", "image/jpeg", "image/png", "image/gif", "image/webp":
-				base64Data := base64.StdEncoding.EncodeToString(part.InlineData.Data)
-				blocks = append(blocks, anthropic.ContentBlockParamUnion{
-					OfImage: &anthropic.ImageBlockParam{
-						Source: anthropic.ImageBlockParamSourceUnion{
-							OfBase64: &anthropic.Base64ImageSourceParam{
-								MediaType: anthropic.Base64ImageSourceMediaType(mediaType),
-								Data:      base64Data,
-							},
-						},
-					},
-				})
+			block, err := convertInlineDataToBlock(part.InlineData)
+			if err != nil {
+				return nil, err
 			}
+			blocks = append(blocks, *block)
 		}
 
 		if part.FunctionCall != nil {
@@ -564,6 +554,59 @@ func filterToolUse(msg anthropic.MessageParam, allowedIDs map[string]bool) anthr
 		filteredBlocks = append(filteredBlocks, block)
 	}
 	return anthropic.MessageParam{Role: msg.Role, Content: filteredBlocks}
+}
+
+// convertInlineDataToBlock converts inline data to the appropriate Anthropic content block.
+// Supports images (jpeg, png, gif, webp), PDFs, and plain text documents.
+// Returns an error for unsupported MIME types, matching Gemini's behavior of letting
+// the request fail rather than silently dropping content.
+func convertInlineDataToBlock(data *genai.Blob) (*anthropic.ContentBlockParamUnion, error) {
+	if data == nil {
+		return nil, fmt.Errorf("inline data is nil")
+	}
+
+	mediaType := data.MIMEType
+	base64Data := base64.StdEncoding.EncodeToString(data.Data)
+
+	switch {
+	case mediaType == "image/jpeg" || mediaType == "image/jpg" || mediaType == "image/png" ||
+		mediaType == "image/gif" || mediaType == "image/webp":
+		return &anthropic.ContentBlockParamUnion{
+			OfImage: &anthropic.ImageBlockParam{
+				Source: anthropic.ImageBlockParamSourceUnion{
+					OfBase64: &anthropic.Base64ImageSourceParam{
+						MediaType: anthropic.Base64ImageSourceMediaType(mediaType),
+						Data:      base64Data,
+					},
+				},
+			},
+		}, nil
+
+	case mediaType == "application/pdf":
+		return &anthropic.ContentBlockParamUnion{
+			OfDocument: &anthropic.DocumentBlockParam{
+				Source: anthropic.DocumentBlockParamSourceUnion{
+					OfBase64: &anthropic.Base64PDFSourceParam{
+						Data: base64Data,
+					},
+				},
+			},
+		}, nil
+
+	case strings.HasPrefix(mediaType, "text/"):
+		return &anthropic.ContentBlockParamUnion{
+			OfDocument: &anthropic.DocumentBlockParam{
+				Source: anthropic.DocumentBlockParamSourceUnion{
+					OfText: &anthropic.PlainTextSourceParam{
+						Data: string(data.Data),
+					},
+				},
+			},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported inline data MIME type for Anthropic: %s", mediaType)
+	}
 }
 
 // hasContent returns true if the message has at least one content block.

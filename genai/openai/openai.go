@@ -301,17 +301,16 @@ func (m *Model) applyGenerationConfig(params *openai.ChatCompletionNewParams, cf
 }
 
 // convertContentToMessages converts a genai.Content into OpenAI message format.
-// Handles text, images, function calls, and function responses.
+// Handles text, images, audio, files, function calls, and function responses.
 func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatCompletionMessageParamUnion, error) {
 	var messages []openai.ChatCompletionMessageParamUnion
 	var textParts []string
 	var toolCalls []openai.ChatCompletionMessageToolCallUnionParam
-	var imageParts []openai.ChatCompletionContentPartImageParam
+	var mediaParts []openai.ChatCompletionContentPartUnionParam
 
 	for _, part := range content.Parts {
 		switch {
 		case part.FunctionResponse != nil:
-			// Tool responses become separate messages
 			responseJSON, err := json.Marshal(part.FunctionResponse.Response)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)
@@ -320,7 +319,6 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 			messages = append(messages, openai.ToolMessage(string(responseJSON), normalizedID))
 
 		case part.FunctionCall != nil:
-			// Collect tool calls for assistant message
 			argsJSON, err := json.Marshal(part.FunctionCall.Args)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function args: %w", err)
@@ -340,15 +338,16 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 			textParts = append(textParts, part.Text)
 
 		case part.InlineData != nil:
-			if img := convertInlineDataToImage(part.InlineData); img != nil {
-				imageParts = append(imageParts, *img)
+			p, err := convertInlineDataToPart(part.InlineData)
+			if err != nil {
+				return nil, err
 			}
+			mediaParts = append(mediaParts, *p)
 		}
 	}
 
-	// Build role-specific message if there's content
-	if len(textParts) > 0 || len(imageParts) > 0 || len(toolCalls) > 0 {
-		msg := m.buildRoleMessage(content.Role, textParts, imageParts, toolCalls)
+	if len(textParts) > 0 || len(mediaParts) > 0 || len(toolCalls) > 0 {
+		msg := m.buildRoleMessage(content.Role, textParts, mediaParts, toolCalls)
 		if msg != nil {
 			messages = append(messages, *msg)
 		}
@@ -358,10 +357,10 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 }
 
 // buildRoleMessage creates the appropriate message type based on role.
-func (m *Model) buildRoleMessage(role string, texts []string, images []openai.ChatCompletionContentPartImageParam, toolCalls []openai.ChatCompletionMessageToolCallUnionParam) *openai.ChatCompletionMessageParamUnion {
+func (m *Model) buildRoleMessage(role string, texts []string, media []openai.ChatCompletionContentPartUnionParam, toolCalls []openai.ChatCompletionMessageToolCallUnionParam) *openai.ChatCompletionMessageParamUnion {
 	switch convertRole(role) {
 	case "user":
-		return buildUserMessage(texts, images)
+		return buildUserMessage(texts, media)
 	case "assistant":
 		return buildAssistantMessage(texts, toolCalls)
 	case "system":
@@ -371,25 +370,20 @@ func (m *Model) buildRoleMessage(role string, texts []string, images []openai.Ch
 	return nil
 }
 
-// buildUserMessage creates a user message, with multi-part support for images.
-func buildUserMessage(texts []string, images []openai.ChatCompletionContentPartImageParam) *openai.ChatCompletionMessageParamUnion {
-	if len(images) == 0 {
+// buildUserMessage creates a user message, with multi-part support for media.
+func buildUserMessage(texts []string, media []openai.ChatCompletionContentPartUnionParam) *openai.ChatCompletionMessageParamUnion {
+	if len(media) == 0 {
 		msg := openai.UserMessage(joinTexts(texts))
 		return &msg
 	}
 
-	// Multi-part message with images
 	var parts []openai.ChatCompletionContentPartUnionParam
 	for _, text := range texts {
 		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
 			OfText: &openai.ChatCompletionContentPartTextParam{Text: text},
 		})
 	}
-	for _, img := range images {
-		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
-			OfImageURL: &img,
-		})
-	}
+	parts = append(parts, media...)
 
 	return &openai.ChatCompletionMessageParamUnion{
 		OfUser: &openai.ChatCompletionUserMessageParam{
@@ -607,22 +601,56 @@ func (m *Model) denormalizeToolCallID(shortID string) string {
 
 // --- Helper functions ---
 
-// convertInlineDataToImage converts inline image data to OpenAI format.
-func convertInlineDataToImage(data *genai.Blob) *openai.ChatCompletionContentPartImageParam {
-	supportedTypes := map[string]bool{
-		"image/jpg": true, "image/jpeg": true, "image/png": true,
-		"image/gif": true, "image/webp": true,
+// convertInlineDataToPart converts inline data to the appropriate OpenAI content part.
+// Supports images (as data URI), audio (wav, mp3), and generic files (PDF, etc.).
+// Returns an error for unsupported MIME types, matching Gemini's behavior of letting
+// the request fail rather than silently dropping content.
+func convertInlineDataToPart(data *genai.Blob) (*openai.ChatCompletionContentPartUnionParam, error) {
+	if data == nil {
+		return nil, fmt.Errorf("inline data is nil")
 	}
 
-	if !supportedTypes[data.MIMEType] {
-		return nil
-	}
+	mediaType := data.MIMEType
+	base64Data := base64.StdEncoding.EncodeToString(data.Data)
 
-	return &openai.ChatCompletionContentPartImageParam{
-		ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-			URL:    fmt.Sprintf("data:%s;base64,%s", data.MIMEType, base64.StdEncoding.EncodeToString(data.Data)),
-			Detail: "auto",
-		},
+	switch {
+	case mediaType == "image/jpeg" || mediaType == "image/jpg" || mediaType == "image/png" ||
+		mediaType == "image/gif" || mediaType == "image/webp":
+		return &openai.ChatCompletionContentPartUnionParam{
+			OfImageURL: &openai.ChatCompletionContentPartImageParam{
+				ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+					URL:    fmt.Sprintf("data:%s;base64,%s", mediaType, base64Data),
+					Detail: "auto",
+				},
+			},
+		}, nil
+
+	case mediaType == "audio/wav" || mediaType == "audio/mp3" ||
+		mediaType == "audio/mpeg" || mediaType == "audio/webm":
+		format := "wav"
+		if mediaType == "audio/mp3" || mediaType == "audio/mpeg" {
+			format = "mp3"
+		}
+		return &openai.ChatCompletionContentPartUnionParam{
+			OfInputAudio: &openai.ChatCompletionContentPartInputAudioParam{
+				InputAudio: openai.ChatCompletionContentPartInputAudioInputAudioParam{
+					Data:   base64Data,
+					Format: format,
+				},
+			},
+		}, nil
+
+	case mediaType == "application/pdf" || strings.HasPrefix(mediaType, "text/"):
+		return &openai.ChatCompletionContentPartUnionParam{
+			OfFile: &openai.ChatCompletionContentPartFileParam{
+				File: openai.ChatCompletionContentPartFileFileParam{
+					FileData: openai.String(fmt.Sprintf("data:%s;base64,%s", mediaType, base64Data)),
+				},
+			},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported inline data MIME type for OpenAI: %s", mediaType)
 	}
 }
 
