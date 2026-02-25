@@ -118,9 +118,11 @@ var _ some.Interface = (*Service)(nil)
 ### Redis Key Naming
 
 ```
-session:{appName}:{userID}:{sessionID}   # Session data
+session:{appName}:{userID}:{sessionID}   # Session data (session-scoped state only)
 sessions:{appName}:{userID}              # Session index (SET)
 events:{appName}:{userID}:{sessionID}    # Event list (LIST)
+appstate:{appName}                       # App-wide state (HASH, shared across all users/sessions)
+userstate:{appName}:{userID}             # Per-user state (HASH, shared across all sessions for that user)
 ```
 
 ### PostgreSQL Schema
@@ -171,6 +173,12 @@ The `OpenAICompatibleEmbedding` implementation works with any OpenAI-compatible 
 2. **State Persistence**: State changes via `State().Set()` immediately persist to Redis.
 3. **Event Loading**: Events are loaded fresh from Redis on each `Events().All()` call.
 4. **Session ID Generation**: If not provided, uses `time.Now().UnixNano()`.
+5. **State Tiers**: State keys are routed to separate Redis stores based on prefix, matching the canonical ADK behaviour:
+   - `app:` keys → `appstate:{appName}` HASH (shared across all users and sessions)
+   - `user:` keys → `userstate:{appName}:{userID}` HASH (shared across all sessions for that user)
+   - `temp:` keys → discarded (never persisted)
+   - Unprefixed keys → stored in the session JSON (per-session)
+6. **State Tier Functions**: `extractStateDeltas` and `mergeStates` mirror `google.golang.org/adk/internal/sessionutils` (which is not importable from outside the ADK module).
 
 ### PostgreSQL Memory Service
 
@@ -235,32 +243,4 @@ Both `memory/postgres` and `tools/memory` import this package; neither imports t
 3. Use `functiontool.New()` to create tools from functions
 4. Define typed args/result structs with JSON tags
 
----
 
-## TODOs
-
-### Redis Session Service — Implement State Tiers (`app:`, `user:`, session-scoped)
-
-The official ADK defines three state key prefixes that route values to **separate stores** with different scopes:
-
-| Prefix | Scope | ADK storage |
-|--------|-------|-------------|
-| _(none)_ | Per-session | `sessions` table / per-session map |
-| `app:` | App-wide (shared across all users and sessions) | `app_states` table / `appState[appName]` |
-| `user:` | Per-user (shared across all sessions for that user) | `user_states` table / `userState[appName][userID]` |
-| `temp:` | Single invocation (never persisted) | Already handled by `trimTempStateDelta` |
-
-The constants are defined in `google.golang.org/adk/session`:
-- `KeyPrefixApp = "app:"`
-- `KeyPrefixUser = "user:"`
-- `KeyPrefixTemp = "temp:"`
-
-The ADK uses `ExtractStateDeltas` (split a flat `StateDelta` into 3 buckets by prefix, stripping the prefix) on write, and `MergeStates` (recombine the 3 stores into a single flat map, re-adding prefixes) on read. See `google.golang.org/adk/internal/sessionutils/utils.go`.
-
-**Current problem**: Our Redis implementation stores everything in a single flat map inside the session key. If an agent writes `app:theme = "dark"`, only that session sees it — other sessions for the same app do not. Same issue with `user:` keys across sessions of the same user.
-
-**What needs to change**:
-1. Add separate Redis keys for app-state (`appstate:{appName}`) and user-state (`userstate:{appName}:{userID}`)
-2. On `AppendEvent`: split `StateDelta` by prefix, strip the prefix, and write each bucket to its corresponding Redis key
-3. On `Get`: load all three stores and merge them back into a single flat map with prefixes re-added
-4. On `Create`: seed state should also be split by prefix into the appropriate stores

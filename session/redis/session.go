@@ -84,6 +84,14 @@ func (s *RedisSessionService) eventsKey(appName, userID, sessionID string) strin
 	return fmt.Sprintf("events:%s:%s:%s", appName, userID, sessionID)
 }
 
+func (s *RedisSessionService) appStateKey(appName string) string {
+	return fmt.Sprintf("appstate:%s", appName)
+}
+
+func (s *RedisSessionService) userStateKey(appName, userID string) string {
+	return fmt.Sprintf("userstate:%s:%s", appName, userID)
+}
+
 // Create creates a new session. It returns an error if a session with the
 // same ID already exists, matching the canonical ADK behaviour.
 func (s *RedisSessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
@@ -99,16 +107,30 @@ func (s *RedisSessionService) Create(ctx context.Context, req *session.CreateReq
 		return nil, fmt.Errorf("session %s already exists", sessionID)
 	}
 
+	appDelta, userDelta, sessionDelta := extractStateDeltas(req.State)
+
+	appState := s.updateAppState(ctx, req.AppName, appDelta)
+	userState := s.updateUserState(ctx, req.AppName, req.UserID, userDelta)
+	mergedState := mergeStates(appState, userState, sessionDelta)
+
 	sess := &redisSession{
 		id:             sessionID,
 		appName:        req.AppName,
 		userID:         req.UserID,
-		state:          newRedisState(req.State, s.client, key, s.ttl),
+		state:          newRedisState(mergedState, s.client, key, s.ttl, s, req.AppName, req.UserID),
 		events:         newRedisEvents(nil, s.client, eventsKey),
 		lastUpdateTime: time.Now(),
 	}
 
-	data, err := json.Marshal(sess.toStorable())
+	storable := storableSession{
+		ID:             sessionID,
+		AppName:        req.AppName,
+		UserID:         req.UserID,
+		State:          sessionDelta,
+		LastUpdateTime: sess.lastUpdateTime,
+	}
+
+	data, err := json.Marshal(storable)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal session: %w", err)
 	}
@@ -117,7 +139,6 @@ func (s *RedisSessionService) Create(ctx context.Context, req *session.CreateReq
 		return nil, fmt.Errorf("failed to store session: %w", err)
 	}
 
-	// Add to sessions index
 	indexKey := s.sessionsIndexKey(req.AppName, req.UserID)
 	if err := s.client.SAdd(ctx, indexKey, sessionID).Err(); err != nil {
 		return nil, fmt.Errorf("failed to update sessions index: %w", err)
@@ -144,7 +165,6 @@ func (s *RedisSessionService) Get(ctx context.Context, req *session.GetRequest) 
 		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
-	// Load events
 	eventsKey := s.eventsKey(req.AppName, req.UserID, req.SessionID)
 	eventData, err := s.client.LRange(ctx, eventsKey, 0, -1).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
@@ -160,7 +180,6 @@ func (s *RedisSessionService) Get(ctx context.Context, req *session.GetRequest) 
 		events = append(events, &evt)
 	}
 
-	// Apply filters
 	if req.NumRecentEvents > 0 && len(events) > req.NumRecentEvents {
 		events = events[len(events)-req.NumRecentEvents:]
 	}
@@ -174,11 +193,15 @@ func (s *RedisSessionService) Get(ctx context.Context, req *session.GetRequest) 
 		events = filtered
 	}
 
+	appState := s.loadAppState(ctx, req.AppName)
+	userState := s.loadUserState(ctx, req.AppName, req.UserID)
+	mergedState := mergeStates(appState, userState, storable.State)
+
 	sess := &redisSession{
 		id:             storable.ID,
 		appName:        storable.AppName,
 		userID:         storable.UserID,
-		state:          newRedisState(storable.State, s.client, key, s.ttl),
+		state:          newRedisState(mergedState, s.client, key, s.ttl, s, req.AppName, req.UserID),
 		events:         newRedisEvents(events, s.client, eventsKey),
 		lastUpdateTime: storable.LastUpdateTime,
 	}
@@ -203,7 +226,7 @@ func (s *RedisSessionService) List(ctx context.Context, req *session.ListRequest
 			SessionID: sessionID,
 		})
 		if err != nil {
-			continue // Skip sessions that can't be retrieved
+			continue
 		}
 		sessions = append(sessions, resp.Session)
 	}
@@ -242,7 +265,6 @@ func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Sess
 		evt.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 
-	// Strip temp: keys from StateDelta before persisting the event.
 	trimTempStateDelta(evt)
 
 	data, err := json.Marshal(evt)
@@ -256,7 +278,6 @@ func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Sess
 	}
 	s.client.Expire(ctx, eventsKey, s.ttl)
 
-	// Load the current persisted session.
 	key := s.sessionKey(sess.AppName(), sess.UserID(), sess.ID())
 	sessData, err := s.client.Get(ctx, key).Bytes()
 	if err != nil {
@@ -268,25 +289,27 @@ func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Sess
 		return fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
-	// Sync the in-memory session state as a baseline.
+	if storable.State == nil {
+		storable.State = make(map[string]any)
+	}
+
 	state := sess.State()
 	if state != nil {
-		if storable.State == nil {
-			storable.State = make(map[string]any)
-		}
 		for k, v := range state.All() {
-			storable.State[k] = v
+			_, _, sessionOnly := extractSingleKey(k, v)
+			if sessionOnly != nil {
+				for sk, sv := range sessionOnly {
+					storable.State[sk] = sv
+				}
+			}
 		}
 	}
 
-	// Apply the event's StateDelta on top, so that state changes recorded by
-	// callbacks (BeforeModel, AfterModel, tools) are persisted even when they
-	// are not yet reflected in the in-memory session state snapshot.
 	if len(evt.Actions.StateDelta) > 0 {
-		if storable.State == nil {
-			storable.State = make(map[string]any)
-		}
-		for k, v := range evt.Actions.StateDelta {
+		appDelta, userDelta, sessionDelta := extractStateDeltas(evt.Actions.StateDelta)
+		s.updateAppState(ctx, sess.AppName(), appDelta)
+		s.updateUserState(ctx, sess.AppName(), sess.UserID(), userDelta)
+		for k, v := range sessionDelta {
 			storable.State[k] = v
 		}
 	}
@@ -302,6 +325,135 @@ func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Sess
 	}
 
 	return nil
+}
+
+// updateAppState writes app-scoped state deltas to Redis and returns the full
+// app state. Uses a Redis HASH for atomic field-level updates.
+func (s *RedisSessionService) updateAppState(ctx context.Context, appName string, delta map[string]any) map[string]any {
+	if len(delta) == 0 {
+		return s.loadAppState(ctx, appName)
+	}
+
+	key := s.appStateKey(appName)
+	fields := marshalHashFields(delta)
+	s.client.HSet(ctx, key, fields)
+	s.client.Expire(ctx, key, s.ttl)
+	return s.loadAppState(ctx, appName)
+}
+
+// updateUserState writes user-scoped state deltas to Redis and returns the full
+// user state. Uses a Redis HASH for atomic field-level updates.
+func (s *RedisSessionService) updateUserState(ctx context.Context, appName, userID string, delta map[string]any) map[string]any {
+	if len(delta) == 0 {
+		return s.loadUserState(ctx, appName, userID)
+	}
+
+	key := s.userStateKey(appName, userID)
+	fields := marshalHashFields(delta)
+	s.client.HSet(ctx, key, fields)
+	s.client.Expire(ctx, key, s.ttl)
+	return s.loadUserState(ctx, appName, userID)
+}
+
+// loadAppState loads the full app state from Redis.
+func (s *RedisSessionService) loadAppState(ctx context.Context, appName string) map[string]any {
+	return s.loadHashState(ctx, s.appStateKey(appName))
+}
+
+// loadUserState loads the full user state from Redis.
+func (s *RedisSessionService) loadUserState(ctx context.Context, appName, userID string) map[string]any {
+	return s.loadHashState(ctx, s.userStateKey(appName, userID))
+}
+
+// loadHashState loads all fields from a Redis HASH and unmarshals values from JSON.
+func (s *RedisSessionService) loadHashState(ctx context.Context, key string) map[string]any {
+	result, err := s.client.HGetAll(ctx, key).Result()
+	if err != nil || len(result) == 0 {
+		return make(map[string]any)
+	}
+	return unmarshalHashFields(result)
+}
+
+// marshalHashFields converts a map[string]any to a map[string]string suitable
+// for Redis HASH storage by JSON-encoding each value.
+func marshalHashFields(m map[string]any) map[string]string {
+	fields := make(map[string]string, len(m))
+	for k, v := range m {
+		data, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		fields[k] = string(data)
+	}
+	return fields
+}
+
+// unmarshalHashFields converts a Redis HASH result back to map[string]any by
+// JSON-decoding each value.
+func unmarshalHashFields(fields map[string]string) map[string]any {
+	m := make(map[string]any, len(fields))
+	for k, v := range fields {
+		var val any
+		if err := json.Unmarshal([]byte(v), &val); err != nil {
+			m[k] = v
+			continue
+		}
+		m[k] = val
+	}
+	return m
+}
+
+// extractStateDeltas splits a flat state map into three separate maps based on
+// key prefixes, mirroring google.golang.org/adk/internal/sessionutils.ExtractStateDeltas.
+// Keys with the "temp:" prefix are discarded.
+func extractStateDeltas(delta map[string]any) (appDelta, userDelta, sessionDelta map[string]any) {
+	appDelta = make(map[string]any)
+	userDelta = make(map[string]any)
+	sessionDelta = make(map[string]any)
+
+	if delta == nil {
+		return appDelta, userDelta, sessionDelta
+	}
+
+	for key, value := range delta {
+		if cleanKey, found := strings.CutPrefix(key, session.KeyPrefixApp); found {
+			appDelta[cleanKey] = value
+		} else if cleanKey, found := strings.CutPrefix(key, session.KeyPrefixUser); found {
+			userDelta[cleanKey] = value
+		} else if !strings.HasPrefix(key, session.KeyPrefixTemp) {
+			sessionDelta[key] = value
+		}
+	}
+	return appDelta, userDelta, sessionDelta
+}
+
+// extractSingleKey classifies a single key-value pair into its state tier.
+// Returns non-nil maps only for the tier the key belongs to. Used when syncing
+// in-memory session state back to the storable (session-scoped only).
+func extractSingleKey(key string, value any) (app, user, sessionOnly map[string]any) {
+	if strings.HasPrefix(key, session.KeyPrefixApp) || strings.HasPrefix(key, session.KeyPrefixUser) || strings.HasPrefix(key, session.KeyPrefixTemp) {
+		return nil, nil, nil
+	}
+	return nil, nil, map[string]any{key: value}
+}
+
+// mergeStates combines app, user, and session state maps into a single flat map,
+// re-adding the appropriate prefixes, mirroring
+// google.golang.org/adk/internal/sessionutils.MergeStates.
+func mergeStates(appState, userState, sessionState map[string]any) map[string]any {
+	totalSize := len(appState) + len(userState) + len(sessionState)
+	merged := make(map[string]any, totalSize)
+
+	for k, v := range sessionState {
+		merged[k] = v
+	}
+	for k, v := range appState {
+		merged[session.KeyPrefixApp+k] = v
+	}
+	for k, v := range userState {
+		merged[session.KeyPrefixUser+k] = v
+	}
+	return merged
 }
 
 // trimTempStateDelta removes keys with the "temp:" prefix from the event's
@@ -326,6 +478,7 @@ func (s *RedisSessionService) Close() error {
 }
 
 // storableSession is the JSON-serializable representation of a session.
+// State only contains session-scoped keys (no app: or user: prefixed keys).
 type storableSession struct {
 	ID             string         `json:"id"`
 	AppName        string         `json:"app_name"`
@@ -352,37 +505,47 @@ func (s *redisSession) Events() session.Events    { return s.events }
 func (s *redisSession) LastUpdateTime() time.Time { return s.lastUpdateTime }
 
 func (s *redisSession) toStorable() storableSession {
-	state := make(map[string]any)
+	sessionOnly := make(map[string]any)
 	for k, v := range s.state.All() {
-		state[k] = v
+		if !strings.HasPrefix(k, session.KeyPrefixApp) && !strings.HasPrefix(k, session.KeyPrefixUser) && !strings.HasPrefix(k, session.KeyPrefixTemp) {
+			sessionOnly[k] = v
+		}
 	}
 	return storableSession{
 		ID:             s.id,
 		AppName:        s.appName,
 		UserID:         s.userID,
-		State:          state,
+		State:          sessionOnly,
 		LastUpdateTime: s.lastUpdateTime,
 	}
 }
 
 // redisState implements session.State with Redis persistence.
+// It holds the merged (all tiers) state in memory and routes writes to the
+// correct Redis key based on the key prefix.
 type redisState struct {
-	data   map[string]any
-	client *redis.Client
-	key    string
-	ttl    time.Duration
+	data    map[string]any
+	client  *redis.Client
+	key     string
+	ttl     time.Duration
+	service *RedisSessionService
+	appName string
+	userID  string
 }
 
-func newRedisState(initial map[string]any, client *redis.Client, key string, ttl time.Duration) *redisState {
+func newRedisState(initial map[string]any, client *redis.Client, key string, ttl time.Duration, service *RedisSessionService, appName, userID string) *redisState {
 	data := make(map[string]any)
 	for k, v := range initial {
 		data[k] = v
 	}
 	return &redisState{
-		data:   data,
-		client: client,
-		key:    key,
-		ttl:    ttl,
+		data:    data,
+		client:  client,
+		key:     key,
+		ttl:     ttl,
+		service: service,
+		appName: appName,
+		userID:  userID,
 	}
 }
 
@@ -397,18 +560,44 @@ func (s *redisState) Get(key string) (any, error) {
 func (s *redisState) Set(key string, value any) error {
 	s.data[key] = value
 
-	// Persist to Redis immediately
-	return s.persist()
-}
-
-func (s *redisState) persist() error {
 	ctx := context.Background()
 
-	// Get current session data
+	if cleanKey, found := strings.CutPrefix(key, session.KeyPrefixApp); found {
+		appKey := s.service.appStateKey(s.appName)
+		data, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("failed to marshal app state value: %w", err)
+		}
+		s.client.HSet(ctx, appKey, cleanKey, string(data))
+		s.client.Expire(ctx, appKey, s.ttl)
+		return nil
+	}
+
+	if cleanKey, found := strings.CutPrefix(key, session.KeyPrefixUser); found {
+		userKey := s.service.userStateKey(s.appName, s.userID)
+		data, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("failed to marshal user state value: %w", err)
+		}
+		s.client.HSet(ctx, userKey, cleanKey, string(data))
+		s.client.Expire(ctx, userKey, s.ttl)
+		return nil
+	}
+
+	if strings.HasPrefix(key, session.KeyPrefixTemp) {
+		return nil
+	}
+
+	return s.persistSessionState()
+}
+
+func (s *redisState) persistSessionState() error {
+	ctx := context.Background()
+
 	data, err := s.client.Get(ctx, s.key).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			return nil // Session doesn't exist yet, will be created
+			return nil
 		}
 		return fmt.Errorf("failed to get session for state update: %w", err)
 	}
@@ -418,14 +607,14 @@ func (s *redisState) persist() error {
 		return fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
-	// Update state
 	storable.State = make(map[string]any)
 	for k, v := range s.data {
-		storable.State[k] = v
+		if !strings.HasPrefix(k, session.KeyPrefixApp) && !strings.HasPrefix(k, session.KeyPrefixUser) && !strings.HasPrefix(k, session.KeyPrefixTemp) {
+			storable.State[k] = v
+		}
 	}
 	storable.LastUpdateTime = time.Now()
 
-	// Save back
 	updatedData, err := json.Marshal(storable)
 	if err != nil {
 		return fmt.Errorf("failed to marshal updated session: %w", err)
@@ -452,7 +641,6 @@ func (s *redisState) All() iter.Seq2[string, any] {
 type redisEvents struct {
 	client *redis.Client
 	key    string
-	// cached events for when we don't have Redis connection info
 	cached []*session.Event
 }
 
