@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -56,6 +57,11 @@ type Model struct {
 	toolCallIDMapMu sync.RWMutex
 }
 
+// HTTPOptions holds optional HTTP-level configuration for the OpenAI client.
+type HTTPOptions struct {
+	Headers http.Header
+}
+
 // Config holds the configuration for creating an OpenAI Model.
 type Config struct {
 	// APIKey for authentication. Falls back to OPENAI_API_KEY env var if empty.
@@ -65,6 +71,8 @@ type Config struct {
 	BaseURL string
 	// ModelName specifies which model to use (e.g., "gpt-4o", "qwen3:8b").
 	ModelName string
+	// HTTPOptions holds optional HTTP-level overrides (e.g. extra headers).
+	HTTPOptions HTTPOptions
 }
 
 // New creates a new OpenAI Model with the given configuration.
@@ -76,6 +84,11 @@ func New(cfg Config) *Model {
 	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	}
+	for k, vals := range cfg.HTTPOptions.Headers {
+		for _, v := range vals {
+			opts = append(opts, option.WithHeaderAdd(k, v))
+		}
 	}
 
 	client := openai.NewClient(opts...)

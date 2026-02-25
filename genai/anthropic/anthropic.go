@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -47,6 +48,11 @@ type Model struct {
 	modelName string
 }
 
+// HTTPOptions holds optional HTTP-level configuration for the Anthropic client.
+type HTTPOptions struct {
+	Headers http.Header
+}
+
 // Config holds configuration for creating a new Model.
 type Config struct {
 	// APIKey is the Anthropic API key. If empty, uses ANTHROPIC_API_KEY env var.
@@ -55,6 +61,8 @@ type Config struct {
 	BaseURL string
 	// ModelName is the model to use (e.g., "claude-sonnet-4-5-20250929").
 	ModelName string
+	// HTTPOptions holds optional HTTP-level overrides (e.g. extra headers).
+	HTTPOptions HTTPOptions
 }
 
 // New creates an Anthropic client from config (API key, base URL, model name).
@@ -66,6 +74,11 @@ func New(cfg Config) *Model {
 	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	}
+	for k, vals := range cfg.HTTPOptions.Headers {
+		for _, v := range vals {
+			opts = append(opts, option.WithHeaderAdd(k, v))
+		}
 	}
 
 	client := anthropic.NewClient(opts...)
