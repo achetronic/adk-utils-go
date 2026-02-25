@@ -831,3 +831,132 @@ func TestListMergesStateTiers(t *testing.T) {
 	}
 	t.Logf("✓ ListMergesStateTiers: all listed sessions see app:global")
 }
+
+// --- Differentiated TTL ---
+
+func TestAppAndUserStateSurviveSessionTTL(t *testing.T) {
+	svc, err := NewRedisSessionService(RedisSessionServiceConfig{
+		Addr: testRedisAddr,
+		TTL:  1 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	t.Cleanup(func() { svc.Close() })
+
+	ctx := context.Background()
+	app := uniquePrefix(t)
+
+	sess, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   app,
+		UserID:    "user-1",
+		SessionID: "sess-1",
+		State: map[string]any{
+			"app:config":    "global-val",
+			"user:pref":     "user-val",
+			"session_local": "ephemeral",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	_, err = svc.Get(ctx, &session.GetRequest{
+		AppName: app, UserID: "user-1", SessionID: sess.Session.ID(),
+	})
+	if err == nil {
+		t.Fatal("session should have expired after 1s TTL")
+	}
+
+	appState := svc.loadAppState(ctx, app)
+	if appState["config"] != "global-val" {
+		t.Errorf("app state should survive session TTL, got: %v", appState)
+	}
+
+	userState := svc.loadUserState(ctx, app, "user-1")
+	if userState["pref"] != "user-val" {
+		t.Errorf("user state should survive session TTL, got: %v", userState)
+	}
+
+	t.Logf("✓ AppAndUserStateSurviveSessionTTL: app/user state persists after session expires")
+}
+
+func TestAppStateTTLExpires(t *testing.T) {
+	svc, err := NewRedisSessionService(RedisSessionServiceConfig{
+		Addr:        testRedisAddr,
+		TTL:         5 * time.Minute,
+		AppStateTTL: 1 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	t.Cleanup(func() { svc.Close() })
+
+	ctx := context.Background()
+	app := uniquePrefix(t)
+
+	_, err = svc.Create(ctx, &session.CreateRequest{
+		AppName:   app,
+		UserID:    "user-1",
+		SessionID: "sess-1",
+		State:     map[string]any{"app:flag": "on"},
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	appState := svc.loadAppState(ctx, app)
+	if appState["flag"] != "on" {
+		t.Fatalf("app state should exist immediately, got: %v", appState)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	appState = svc.loadAppState(ctx, app)
+	if len(appState) != 0 {
+		t.Errorf("app state should have expired after AppStateTTL, got: %v", appState)
+	}
+
+	t.Logf("✓ AppStateTTLExpires: app state correctly expires with custom TTL")
+}
+
+func TestUserStateTTLExpires(t *testing.T) {
+	svc, err := NewRedisSessionService(RedisSessionServiceConfig{
+		Addr:         testRedisAddr,
+		TTL:          5 * time.Minute,
+		UserStateTTL: 1 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create service: %v", err)
+	}
+	t.Cleanup(func() { svc.Close() })
+
+	ctx := context.Background()
+	app := uniquePrefix(t)
+
+	_, err = svc.Create(ctx, &session.CreateRequest{
+		AppName:   app,
+		UserID:    "user-1",
+		SessionID: "sess-1",
+		State:     map[string]any{"user:lang": "es"},
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	userState := svc.loadUserState(ctx, app, "user-1")
+	if userState["lang"] != "es" {
+		t.Fatalf("user state should exist immediately, got: %v", userState)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	userState = svc.loadUserState(ctx, app, "user-1")
+	if len(userState) != 0 {
+		t.Errorf("user state should have expired after UserStateTTL, got: %v", userState)
+	}
+
+	t.Logf("✓ UserStateTTLExpires: user state correctly expires with custom TTL")
+}

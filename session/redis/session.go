@@ -29,8 +29,10 @@ import (
 
 // RedisSessionService implements session.Service using Redis as the backend.
 type RedisSessionService struct {
-	client *redis.Client
-	ttl    time.Duration
+	client      *redis.Client
+	ttl         time.Duration
+	appStateTTL time.Duration
+	userStateTTL time.Duration
 }
 
 // RedisSessionServiceConfig holds configuration for RedisSessionService.
@@ -43,6 +45,14 @@ type RedisSessionServiceConfig struct {
 	DB int
 	// TTL is the session expiration time (default: 24 hours)
 	TTL time.Duration
+	// AppStateTTL is the expiration time for app-scoped state.
+	// Defaults to 0 (no expiration), matching the canonical ADK behaviour
+	// where app state outlives individual sessions.
+	AppStateTTL time.Duration
+	// UserStateTTL is the expiration time for user-scoped state.
+	// Defaults to 0 (no expiration), matching the canonical ADK behaviour
+	// where user state outlives individual sessions.
+	UserStateTTL time.Duration
 }
 
 // NewRedisSessionService creates a new Redis-backed session service.
@@ -66,8 +76,10 @@ func NewRedisSessionService(cfg RedisSessionServiceConfig) (*RedisSessionService
 	}
 
 	return &RedisSessionService{
-		client: client,
-		ttl:    ttl,
+		client:       client,
+		ttl:          ttl,
+		appStateTTL:  cfg.AppStateTTL,
+		userStateTTL: cfg.UserStateTTL,
 	}, nil
 }
 
@@ -343,7 +355,11 @@ func (s *RedisSessionService) updateAppState(ctx context.Context, appName string
 	key := s.appStateKey(appName)
 	fields := marshalHashFields(delta)
 	s.client.HSet(ctx, key, fields)
-	s.client.Expire(ctx, key, s.ttl)
+	if s.appStateTTL > 0 {
+		s.client.Expire(ctx, key, s.appStateTTL)
+	} else {
+		s.client.Persist(ctx, key)
+	}
 	return s.loadAppState(ctx, appName)
 }
 
@@ -357,7 +373,11 @@ func (s *RedisSessionService) updateUserState(ctx context.Context, appName, user
 	key := s.userStateKey(appName, userID)
 	fields := marshalHashFields(delta)
 	s.client.HSet(ctx, key, fields)
-	s.client.Expire(ctx, key, s.ttl)
+	if s.userStateTTL > 0 {
+		s.client.Expire(ctx, key, s.userStateTTL)
+	} else {
+		s.client.Persist(ctx, key)
+	}
 	return s.loadUserState(ctx, appName, userID)
 }
 
@@ -575,7 +595,11 @@ func (s *redisState) Set(key string, value any) error {
 			return fmt.Errorf("failed to marshal app state value: %w", err)
 		}
 		s.client.HSet(ctx, appKey, cleanKey, string(data))
-		s.client.Expire(ctx, appKey, s.ttl)
+		if s.service.appStateTTL > 0 {
+			s.client.Expire(ctx, appKey, s.service.appStateTTL)
+		} else {
+			s.client.Persist(ctx, appKey)
+		}
 		return nil
 	}
 
@@ -586,7 +610,11 @@ func (s *redisState) Set(key string, value any) error {
 			return fmt.Errorf("failed to marshal user state value: %w", err)
 		}
 		s.client.HSet(ctx, userKey, cleanKey, string(data))
-		s.client.Expire(ctx, userKey, s.ttl)
+		if s.service.userStateTTL > 0 {
+			s.client.Expire(ctx, userKey, s.service.userStateTTL)
+		} else {
+			s.client.Persist(ctx, userKey)
+		}
 		return nil
 	}
 
