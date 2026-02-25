@@ -197,13 +197,19 @@ func (s *RedisSessionService) Get(ctx context.Context, req *session.GetRequest) 
 	userState := s.loadUserState(ctx, req.AppName, req.UserID)
 	mergedState := mergeStates(appState, userState, storable.State)
 
+	filtered := req.NumRecentEvents > 0 || !req.After.IsZero()
+
 	sess := &redisSession{
 		id:             storable.ID,
 		appName:        storable.AppName,
 		userID:         storable.UserID,
 		state:          newRedisState(mergedState, s.client, key, s.ttl, s, req.AppName, req.UserID),
-		events:         newRedisEvents(events, s.client, eventsKey),
 		lastUpdateTime: storable.LastUpdateTime,
+	}
+	if filtered {
+		sess.events = newFilteredRedisEvents(events)
+	} else {
+		sess.events = newRedisEvents(events, s.client, eventsKey)
 	}
 
 	return &session.GetResponse{Session: sess}, nil
@@ -638,10 +644,14 @@ func (s *redisState) All() iter.Seq2[string, any] {
 }
 
 // redisEvents implements session.Events with live Redis reads.
+// When filtered is true, the cached slice is the authoritative source (e.g.
+// after Get applied NumRecentEvents / After filters) and loadFromRedis returns
+// it directly without re-fetching.
 type redisEvents struct {
-	client *redis.Client
-	key    string
-	cached []*session.Event
+	client   *redis.Client
+	key      string
+	cached   []*session.Event
+	filtered bool
 }
 
 func newRedisEvents(events []*session.Event, client *redis.Client, key string) *redisEvents {
@@ -655,8 +665,18 @@ func newRedisEvents(events []*session.Event, client *redis.Client, key string) *
 	}
 }
 
+func newFilteredRedisEvents(events []*session.Event) *redisEvents {
+	if events == nil {
+		events = make([]*session.Event, 0)
+	}
+	return &redisEvents{
+		cached:   events,
+		filtered: true,
+	}
+}
+
 func (e *redisEvents) loadFromRedis() []*session.Event {
-	if e.client == nil || e.key == "" {
+	if e.filtered || e.client == nil || e.key == "" {
 		return e.cached
 	}
 
