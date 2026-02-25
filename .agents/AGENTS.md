@@ -7,7 +7,7 @@ Agent guidelines for working in the `adk-utils-go` repository.
 A Go library providing utilities for Google's Agent Development Kit (ADK). This library extends ADK with additional backend implementations for topics like session management or memory services.
 
 **Module**: `github.com/achetronic/adk-utils-go` (see `go.mod`)  
-**Go Version**: 1.24.9+  
+**Go Version**: 1.24.9+ (toolchain 1.25.5)  
 **ADK Version**: v0.4.0
 
 ### Key Dependencies
@@ -59,20 +59,47 @@ go mod verify
 
 ```
 adk-utils-go/
+├── genai/
+│   ├── openai/
+│   │   └── openai.go            # OpenAI/Ollama-compatible LLM adapter
+│   └── anthropic/
+│       └── anthropic.go         # Anthropic Claude LLM adapter
 ├── session/
 │   └── redis/
-│       └── session.go        # Redis-backed session.Service implementation
+│       ├── session.go           # Redis-backed session.Service implementation
+│       └── session_test.go      # Session tests (requires Redis)
 ├── memory/
 │   ├── memorytypes/
-│   │   └── types.go          # Shared types and interfaces (EntryWithID, ExtendedMemoryService)
+│   │   └── types.go             # Shared types and interfaces (EntryWithID, ExtendedMemoryService)
 │   └── postgres/
-│       ├── memory.go         # PostgreSQL-backed memory.Service implementation
-│       ├── memory_test.go    # Memory service tests (requires PostgreSQL)
-│       ├── embedding.go      # OpenAI-compatible embedding model
-│       └── embedding_test.go # Embedding tests (uses httptest mocks)
+│       ├── memory.go            # PostgreSQL-backed memory.Service implementation
+│       ├── memory_test.go       # Memory service tests (requires PostgreSQL)
+│       ├── embedding.go         # OpenAI-compatible embedding model
+│       └── embedding_test.go    # Embedding tests (uses httptest mocks)
+├── artifact/
+│   └── filesystem/
+│       ├── artifact.go          # Filesystem-backed artifact.Service implementation
+│       └── artifact_test.go     # Artifact tests
 ├── tools/
 │   └── memory/
-│       └── toolset.go        # Memory toolset for agent tools
+│       └── toolset.go           # Memory toolset for agent tools
+├── plugin/
+│   └── contextguard/
+│       ├── contextguard.go           # Public API: New(), Add(), PluginConfig(), AgentOption, strategy constants
+│       ├── contextguard_test.go      # 62 tests covering all functions
+│       ├── compaction_simulation_test.go # Realistic simulation: kube-agent, mixed-debug, pure-tool-storm
+│       ├── model_registry.go         # ModelRegistry interface (ContextWindow, DefaultMaxTokens)
+│       ├── model_registry_crush.go   # CrushRegistry: fetches from Crush provider.json, 6h refresh
+│       ├── compaction_utils.go       # Internal helpers: state, summarization, tokens, splitting
+│       ├── compaction_threshold.go   # Token-threshold strategy (Compact, iterative retry)
+│       └── compaction_sliding_window.go # Sliding-window strategy (Compact, iterative retry)
+├── examples/
+│   ├── openai-client/main.go
+│   ├── anthropic-client/main.go
+│   ├── session-memory/main.go
+│   ├── long-term-memory/main.go
+│   ├── full-memory/main.go
+│   └── context-guard/main.go    # All 3 modes: CrushRegistry, WithMaxTokens, WithSlidingWindow
 ├── go.mod
 └── go.sum
 ```
@@ -81,10 +108,14 @@ adk-utils-go/
 
 | Package | Description |
 |---------|-------------|
+| `genai/openai` | OpenAI/Ollama-compatible `model.LLM` adapter |
+| `genai/anthropic` | Anthropic Claude `model.LLM` adapter |
 | `session/redis` | Redis-backed implementation of `session.Service` |
 | `memory/memorytypes` | Shared types (`EntryWithID`) and interfaces (`MemoryService`, `ExtendedMemoryService`) |
 | `memory/postgres` | PostgreSQL+pgvector implementation of `memory.Service` and `ExtendedMemoryService` |
+| `artifact/filesystem` | Filesystem-backed `artifact.Service` implementation |
 | `tools/memory` | ADK toolset providing `search_memory`, `save_to_memory`, `update_memory`, and `delete_memory` tools |
+| `plugin/contextguard` | ADK plugin for context window management (threshold + sliding window strategies) |
 
 ---
 
@@ -150,6 +181,7 @@ The `OpenAICompatibleEmbedding` implementation works with any OpenAI-compatible 
 ### Unit Tests (No External Dependencies)
 
 - `embedding_test.go` - Uses `httptest` mock servers
+- `contextguard_test.go` - 48 unit tests with mock LLM, state, and registry (no network)
 
 ### Integration Tests (Require External Services)
 
@@ -242,5 +274,48 @@ Both `memory/postgres` and `tools/memory` import this package; neither imports t
 2. Implement `tool.Toolset` interface
 3. Use `functiontool.New()` to create tools from functions
 4. Define typed args/result structs with JSON tags
+
+---
+
+## ContextGuard Plugin
+
+The `plugin/contextguard` package provides an ADK plugin that prevents conversations from exceeding the LLM's context window.
+
+### API
+
+```go
+guard := contextguard.New(registry)  // ModelRegistry or CrushRegistry
+guard.Add("assistant", llm)           // threshold (auto-detect from registry)
+guard.Add("agent2", llm, contextguard.WithMaxTokens(500_000))  // threshold (manual)
+guard.Add("agent3", llm, contextguard.WithSlidingWindow(30))   // sliding window
+cfg := guard.PluginConfig()           // runner.PluginConfig with single BeforeModelCallback
+```
+
+### Key Design
+
+- **Builder pattern**: `New()` + `Add()` + `PluginConfig()` — single-agent and multi-agent look identical
+- **Functional options**: `AgentOption` keeps common case zero-config, overrides via `WithMaxTokens`/`WithSlidingWindow`
+- **Per-agent strategies**: each agent gets its own strategy and summarizes with its own LLM
+- **ADK limitation**: `launcher.Config.PluginConfig` is a single field — the plugin internally dispatches by `ctx.AgentName()`
+- **State keys**: all keys suffixed with `{agentName}` to prevent cross-agent contamination in shared sessions
+
+### File Naming Convention
+
+- `contextguard.go` — public API
+- `model_registry*.go` — ModelRegistry interface and implementations
+- `compaction_*.go` — compaction strategies and shared helpers
+
+### CrushRegistry
+
+Built-in `ModelRegistry` that fetches model metadata from `https://raw.githubusercontent.com/charmbracelet/crush/main/internal/agent/hyper/provider.json`. Background refresh every 6h. Defaults to 128k context / 4096 max tokens for unknown models.
+
+### Strategies
+
+| Strategy | Trigger | Config |
+|---|---|---|
+| `threshold` | estimated tokens > (contextWindow - buffer) | `WithMaxTokens(n)` or auto from registry |
+| `sliding_window` | turns since last compaction > maxTurns | `WithSlidingWindow(n)` |
+
+Buffer: fixed 20k for windows >200k, 20% for smaller ones.
 
 

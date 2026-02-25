@@ -1034,3 +1034,276 @@ func TestWithMaxTokens_SetsField(t *testing.T) {
 		t.Errorf("strategy should not be set, got %q", cfg.strategy)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Helper: makeToolOnlyConversation
+// ---------------------------------------------------------------------------
+
+func makeToolOnlyConversation(pairs int) []*genai.Content {
+	contents := make([]*genai.Content, 0, pairs*2)
+	for i := 0; i < pairs; i++ {
+		contents = append(contents,
+			toolCallContent(fmt.Sprintf("tool_%d", i)),
+			toolResultContent(fmt.Sprintf("tool_%d", i)),
+		)
+	}
+	return contents
+}
+
+func makeLargeToolResultContent(name string, size int) *genai.Content {
+	return &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				Name:     name,
+				Response: map[string]any{"result": strings.Repeat("x", size)},
+			},
+		}},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Fix 1 — safeSplitIndex must never regress to 0
+// ---------------------------------------------------------------------------
+
+func TestSafeSplitIndex_AllToolCalls_NeverReturnsZero(t *testing.T) {
+	contents := makeToolOnlyConversation(10)
+
+	for candidateIdx := 1; candidateIdx < len(contents); candidateIdx++ {
+		got := safeSplitIndex(contents, candidateIdx)
+		if got <= 0 {
+			t.Errorf("safeSplitIndex(contents, %d) = %d; must never be 0 for all-tool conversations", candidateIdx, got)
+		}
+	}
+}
+
+func TestSafeSplitIndex_AllToolCalls_FloorAtOne(t *testing.T) {
+	contents := makeToolOnlyConversation(5)
+
+	got := safeSplitIndex(contents, 1)
+	if got < 1 {
+		t.Errorf("safeSplitIndex(contents, 1) = %d; expected >= 1", got)
+	}
+}
+
+func TestSafeSplitIndex_ForwardWalk_LandsBetweenPairs(t *testing.T) {
+	contents := makeToolOnlyConversation(5)
+
+	got := safeSplitIndex(contents, 3)
+
+	if got <= 0 || got >= len(contents) {
+		t.Fatalf("safeSplitIndex(contents, 3) = %d; out of bounds", got)
+	}
+	if got%2 != 0 {
+		t.Errorf("safeSplitIndex(contents, 3) = %d; expected even index (pair boundary), tool pairs are [0,1], [2,3], [4,5]...", got)
+	}
+}
+
+func TestSafeSplitIndex_MixedConversation_BackwardStillWorks(t *testing.T) {
+	contents := []*genai.Content{
+		textContent("user", "hello"),
+		textContent("model", "let me check"),
+		toolCallContent("search"),
+		toolResultContent("search"),
+		textContent("model", "results"),
+		textContent("user", "thanks"),
+	}
+
+	got := safeSplitIndex(contents, 3)
+	if got != 1 {
+		t.Errorf("safeSplitIndex should walk back past tool chain to text at idx 1, got %d", got)
+	}
+}
+
+func TestSafeSplitIndex_ForwardWalk_SkipsCompletePairs(t *testing.T) {
+	contents := []*genai.Content{
+		toolCallContent("a"),
+		toolResultContent("a"),
+		toolCallContent("b"),
+		toolResultContent("b"),
+		toolCallContent("c"),
+		toolResultContent("c"),
+		textContent("user", "done"),
+	}
+
+	got := safeSplitIndex(contents, 1)
+	if got < 2 {
+		t.Errorf("safeSplitIndex(1) should walk forward to pair boundary, got %d", got)
+	}
+	if got > 6 {
+		t.Errorf("safeSplitIndex(1) should not go past the text message at 6, got %d", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Iterative compaction (Proposal 2)
+// ---------------------------------------------------------------------------
+
+func TestThresholdStrategy_IterativeCompaction(t *testing.T) {
+	registry := &mockRegistry{
+		contextWindows: map[string]int{"small-model": 2_000},
+		maxTokens:      map[string]int{"small-model": 512},
+	}
+	llm := &mockLLM{name: "small-model", response: "compact summary"}
+	s := newThresholdStrategy(registry, llm, 0)
+	ctx := newMockCallbackContext("agent1")
+
+	req := &model.LLMRequest{
+		Model:    "small-model",
+		Contents: makeLargeConversation(5_000),
+	}
+
+	tokensBefore := estimateTokens(req)
+	buffer := computeBuffer(2_000)
+	threshold := 2_000 - buffer
+
+	if tokensBefore <= threshold {
+		t.Skip("test data too small to trigger compaction")
+	}
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if !strings.Contains(req.Contents[0].Parts[0].Text, "[Previous conversation summary]") {
+		t.Error("first content should be the summary")
+	}
+
+	summary := loadSummary(ctx)
+	if summary == "" {
+		t.Error("summary should have been persisted")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Fix 2 — findSplitIndex must count FunctionCall/FunctionResponse tokens
+// ---------------------------------------------------------------------------
+
+func TestFindSplitIndex_ToolCallsCountTokens(t *testing.T) {
+	contents := []*genai.Content{
+		textContent("user", "hello"),
+		textContent("model", "let me check"),
+		toolCallContent("big_tool"),
+		makeLargeToolResultContent("big_tool", 4000),
+		toolCallContent("another_tool"),
+		makeLargeToolResultContent("another_tool", 4000),
+		textContent("user", "ok"),
+		textContent("model", "done"),
+	}
+
+	budget := 500
+	idx := findSplitIndex(contents, budget)
+
+	recentContents := contents[idx:]
+	recentTextTokens := 0
+	for _, c := range recentContents {
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p == nil {
+				continue
+			}
+			if p.Text != "" {
+				recentTextTokens += len(p.Text) / 4
+			}
+			if p.FunctionCall != nil {
+				recentTextTokens += len(p.FunctionCall.Name) / 4
+				for k, v := range p.FunctionCall.Args {
+					recentTextTokens += len(k) / 4
+					recentTextTokens += len(fmt.Sprintf("%v", v)) / 4
+				}
+			}
+			if p.FunctionResponse != nil {
+				recentTextTokens += len(p.FunctionResponse.Name) / 4
+				recentTextTokens += len(fmt.Sprintf("%v", p.FunctionResponse.Response)) / 4
+			}
+		}
+	}
+
+	if recentTextTokens > budget*2 {
+		t.Errorf("findSplitIndex kept too many recent tokens: %d (budget was %d); tool call tokens not counted?",
+			recentTextTokens, budget)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: End-to-end — threshold strategy compacts all-tool conversations
+// ---------------------------------------------------------------------------
+
+func TestThresholdStrategy_AllToolCalls_StillCompacts(t *testing.T) {
+	registry := &mockRegistry{
+		contextWindows: map[string]int{"small-model": 1_000},
+		maxTokens:      map[string]int{"small-model": 512},
+	}
+	llm := &mockLLM{name: "small-model", response: "Summarized tool conversation"}
+	s := newThresholdStrategy(registry, llm, 0)
+	ctx := newMockCallbackContext("agent1")
+
+	var contents []*genai.Content
+	for i := 0; i < 50; i++ {
+		contents = append(contents,
+			toolCallContent(fmt.Sprintf("kubectl_%d", i)),
+			&genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						Name:     fmt.Sprintf("kubectl_%d", i),
+						Response: map[string]any{"result": strings.Repeat("pod-data-", 50)},
+					},
+				}},
+			},
+		)
+	}
+
+	req := &model.LLMRequest{
+		Model:    "small-model",
+		Contents: contents,
+	}
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if !strings.Contains(req.Contents[0].Parts[0].Text, "Summarized tool conversation") {
+		t.Error("first content should be the summary after compaction")
+	}
+
+	summary := loadSummary(ctx)
+	if summary == "" {
+		t.Error("summary should have been persisted to state")
+	}
+}
+
+func TestSlidingWindowStrategy_AllToolCalls_StillCompacts(t *testing.T) {
+	registry := newMockRegistry()
+	llm := &mockLLM{name: "gpt-4o", response: "Summarized sliding window"}
+	s := newSlidingWindowStrategy(registry, llm, 5)
+	ctx := newMockCallbackContext("agent1")
+
+	req := &model.LLMRequest{
+		Model:    "gpt-4o",
+		Contents: makeToolOnlyConversation(20),
+	}
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if !strings.Contains(req.Contents[0].Parts[0].Text, "Summarized sliding window") {
+		t.Error("first content should be the summary")
+	}
+
+	summary := loadSummary(ctx)
+	if summary == "" {
+		t.Error("summary should have been persisted to state")
+	}
+
+	watermark := loadContentsAtCompaction(ctx)
+	if watermark <= 0 {
+		t.Error("watermark should have been written after compaction")
+	}
+}

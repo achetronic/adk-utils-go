@@ -52,7 +52,9 @@ func (s *slidingWindowStrategy) Name() string {
 
 // Compact counts Content entries that arrived after the last compaction.
 // If that count exceeds maxTurns, it summarizes all old entries and keeps
-// only a small recent window. Otherwise it injects the existing summary
+// only a small recent window. If a single pass still exceeds the context
+// window, it retries with a progressively smaller recent window (up to
+// maxCompactionAttempts). Otherwise it injects the existing summary
 // (if any) and returns without touching the conversation.
 func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LLMRequest) error {
 	existingSummary := loadSummary(ctx)
@@ -80,44 +82,69 @@ func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LL
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	recentKeep := max(3, s.maxTurns*30/100)
-	splitIdx := safeSplitIndex(req.Contents, len(req.Contents)-recentKeep)
-	oldContents := req.Contents[:splitIdx]
-	recentContents := req.Contents[splitIdx:]
-
 	contextWindow := s.registry.ContextWindow(req.Model)
 	buffer := computeBuffer(contextWindow)
+	threshold := contextWindow - buffer
 
-	summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer)
-	if err != nil {
-		slog.Error("ContextGuard [sliding_window]: summarization FAILED",
+	recentKeep := max(3, s.maxTurns*30/100)
+
+	for attempt := range maxCompactionAttempts {
+		splitIdx := safeSplitIndex(req.Contents, len(req.Contents)-recentKeep)
+		oldContents := req.Contents[:splitIdx]
+		recentContents := req.Contents[splitIdx:]
+
+		if len(oldContents) == 0 {
+			slog.Warn("ContextGuard [sliding_window]: nothing to compact (split at 0), aborting",
+				"agent", ctx.AgentName(),
+				"attempt", attempt+1,
+			)
+			break
+		}
+
+		summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer)
+		if err != nil {
+			slog.Error("ContextGuard [sliding_window]: summarization FAILED",
+				"agent", ctx.AgentName(),
+				"session", ctx.SessionID(),
+				"error", err,
+			)
+			return fmt.Errorf("summarization failed: %w", err)
+		}
+
+		existingSummary = summary
+		tokenEstimate := estimateContentTokens(oldContents)
+		persistSummary(ctx, summary, tokenEstimate)
+		persistContentsAtCompaction(ctx, totalContents)
+
+		replaceSummary(req, summary, recentContents)
+
+		newTokens := estimateTokens(req)
+
+		slog.Info("ContextGuard [sliding_window]: compaction pass completed",
 			"agent", ctx.AgentName(),
 			"session", ctx.SessionID(),
-			"error", err,
+			"attempt", attempt+1,
+			"oldMessages", len(oldContents),
+			"recentMessages", len(recentContents),
+			"newTokenEstimate", newTokens,
+			"watermarkWritten", totalContents,
 		)
-		return fmt.Errorf("summarization failed: %w", err)
+
+		if newTokens < threshold {
+			break
+		}
+
+		if attempt < maxCompactionAttempts-1 {
+			recentKeep = max(3, recentKeep/2)
+			slog.Warn("ContextGuard [sliding_window]: still above threshold, retrying with smaller window",
+				"agent", ctx.AgentName(),
+				"attempt", attempt+1,
+				"newRecentKeep", recentKeep,
+				"tokens", newTokens,
+				"threshold", threshold,
+			)
+		}
 	}
-
-	slog.Info("ContextGuard [sliding_window]: summarization succeeded, compressing conversation",
-		"agent", ctx.AgentName(),
-		"session", ctx.SessionID(),
-		"summaryLen", len(summary),
-	)
-
-	tokenEstimate := estimateContentTokens(oldContents)
-	persistSummary(ctx, summary, tokenEstimate)
-	persistContentsAtCompaction(ctx, totalContents)
-
-	replaceSummary(req, summary, recentContents)
-
-	slog.Info("ContextGuard [sliding_window]: conversation compressed",
-		"agent", ctx.AgentName(),
-		"session", ctx.SessionID(),
-		"oldMessages", len(oldContents),
-		"recentMessages", len(recentContents),
-		"newTokenEstimate", estimateTokens(req),
-		"watermarkWritten", totalContents,
-	)
 
 	return nil
 }

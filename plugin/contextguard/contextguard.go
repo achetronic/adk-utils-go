@@ -71,6 +71,8 @@ const (
 	largeContextWindowBuffer    = 20_000
 	smallContextWindowRatio     = 0.20
 	recentWindowRatio           = 0.20
+
+	maxCompactionAttempts = 3
 )
 
 const defaultMaxTurns = 20

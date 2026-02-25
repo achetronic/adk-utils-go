@@ -50,7 +50,9 @@ func (s *thresholdStrategy) Name() string {
 
 // Compact checks the token estimate against the model's context window and,
 // if the threshold is exceeded, splits the conversation into old + recent,
-// summarizes the old portion, and rewrites req.Contents in place.
+// summarizes the old portion, and rewrites req.Contents in place. If a single
+// pass is not enough, it retries with a progressively smaller recent budget
+// (up to maxCompactionAttempts).
 func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMRequest) error {
 	var contextWindow int
 	if s.maxTokens > 0 {
@@ -85,26 +87,57 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 	defer s.mu.Unlock()
 
 	recentBudget := int(float64(contextWindow) * recentWindowRatio)
-	splitIdx := findSplitIndex(req.Contents, recentBudget)
 
-	oldContents := req.Contents[:splitIdx]
-	recentContents := req.Contents[splitIdx:]
+	for attempt := range maxCompactionAttempts {
+		splitIdx := findSplitIndex(req.Contents, recentBudget)
 
-	summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer)
-	if err != nil {
-		return fmt.Errorf("summarization failed: %w", err)
+		oldContents := req.Contents[:splitIdx]
+		recentContents := req.Contents[splitIdx:]
+
+		if len(oldContents) == 0 {
+			slog.Warn("ContextGuard [threshold]: nothing to compact (split at 0), aborting",
+				"agent", ctx.AgentName(),
+				"attempt", attempt+1,
+			)
+			break
+		}
+
+		summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer)
+		if err != nil {
+			return fmt.Errorf("summarization failed: %w", err)
+		}
+
+		existingSummary = summary
+		persistSummary(ctx, summary, totalTokens)
+		replaceSummary(req, summary, recentContents)
+
+		newTokens := estimateTokens(req)
+
+		slog.Info("ContextGuard [threshold]: compaction pass completed",
+			"agent", ctx.AgentName(),
+			"session", ctx.SessionID(),
+			"attempt", attempt+1,
+			"oldMessages", len(oldContents),
+			"recentMessages", len(recentContents),
+			"newTokenEstimate", newTokens,
+			"threshold", threshold,
+		)
+
+		if newTokens < threshold {
+			break
+		}
+
+		if attempt < maxCompactionAttempts-1 {
+			recentBudget /= 2
+			slog.Warn("ContextGuard [threshold]: still above threshold, retrying with tighter budget",
+				"agent", ctx.AgentName(),
+				"attempt", attempt+1,
+				"newBudget", recentBudget,
+				"tokens", newTokens,
+				"threshold", threshold,
+			)
+		}
 	}
-
-	persistSummary(ctx, summary, totalTokens)
-	replaceSummary(req, summary, recentContents)
-
-	slog.Info("ContextGuard [threshold]: conversation compressed",
-		"agent", ctx.AgentName(),
-		"session", ctx.SessionID(),
-		"oldMessages", len(oldContents),
-		"recentMessages", len(recentContents),
-		"newTokenEstimate", estimateTokens(req),
-	)
 
 	return nil
 }

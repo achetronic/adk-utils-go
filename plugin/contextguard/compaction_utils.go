@@ -259,46 +259,46 @@ func buildFallbackSummary(contents []*genai.Content, previousSummary string) str
 
 // --- Token estimation ---
 
+// estimatePartTokens returns a rough token count for a single Part using
+// the ~4 chars per token heuristic. It accounts for Text, FunctionCall
+// (name + args), and FunctionResponse (name + response).
+func estimatePartTokens(part *genai.Part) int {
+	if part == nil {
+		return 0
+	}
+	total := 0
+	if part.Text != "" {
+		total += len(part.Text) / 4
+	}
+	if part.FunctionCall != nil {
+		total += len(part.FunctionCall.Name) / 4
+		for k, v := range part.FunctionCall.Args {
+			total += len(k) / 4
+			total += len(fmt.Sprintf("%v", v)) / 4
+		}
+	}
+	if part.FunctionResponse != nil {
+		total += len(part.FunctionResponse.Name) / 4
+		total += len(fmt.Sprintf("%v", part.FunctionResponse.Response)) / 4
+	}
+	return total
+}
+
 // estimateTokens returns a rough token count for the entire LLM request
 // (contents + system instruction) using the ~4 chars per token heuristic.
 func estimateTokens(req *model.LLMRequest) int {
-	total := 0
-	for _, content := range req.Contents {
-		if content == nil {
-			continue
-		}
-		for _, part := range content.Parts {
-			if part == nil {
-				continue
-			}
-			if part.Text != "" {
-				total += len(part.Text) / 4
-			}
-			if part.FunctionCall != nil {
-				total += len(part.FunctionCall.Name) / 4
-				for k, v := range part.FunctionCall.Args {
-					total += len(k) / 4
-					total += len(fmt.Sprintf("%v", v)) / 4
-				}
-			}
-			if part.FunctionResponse != nil {
-				total += len(part.FunctionResponse.Name) / 4
-				total += len(fmt.Sprintf("%v", part.FunctionResponse.Response)) / 4
-			}
-		}
-	}
+	total := estimateContentTokens(req.Contents)
 	if req.Config != nil && req.Config.SystemInstruction != nil {
 		for _, part := range req.Config.SystemInstruction.Parts {
-			if part != nil && part.Text != "" {
-				total += len(part.Text) / 4
-			}
+			total += estimatePartTokens(part)
 		}
 	}
 	return total
 }
 
 // estimateContentTokens returns a rough token count for a slice of Content
-// entries using the ~4 chars per token heuristic.
+// entries using the ~4 chars per token heuristic. It counts all part types
+// (Text, FunctionCall, FunctionResponse).
 func estimateContentTokens(contents []*genai.Content) int {
 	total := 0
 	for _, content := range contents {
@@ -306,12 +306,7 @@ func estimateContentTokens(contents []*genai.Content) int {
 			continue
 		}
 		for _, part := range content.Parts {
-			if part == nil {
-				continue
-			}
-			if part.Text != "" {
-				total += len(part.Text) / 4
-			}
+			total += estimatePartTokens(part)
 		}
 	}
 	return total
@@ -338,9 +333,7 @@ func findSplitIndex(contents []*genai.Content, recentBudget int) int {
 			continue
 		}
 		for _, part := range contents[i].Parts {
-			if part != nil && part.Text != "" {
-				tokens += len(part.Text) / 4
-			}
+			tokens += estimatePartTokens(part)
 		}
 		if tokens >= recentBudget {
 			if i < len(contents)-2 {
@@ -356,13 +349,38 @@ func findSplitIndex(contents []*genai.Content, recentBudget int) int {
 }
 
 // safeSplitIndex adjusts a candidate split index so it never lands in the
-// middle of a tool_use/tool_result chain, preventing provider errors when
-// the agent performed consecutive tool calls.
+// middle of a tool_call/tool_response pair. It first tries walking backwards
+// to find a clean boundary (text message or start of a tool pair). If that
+// would regress past the original candidate, it walks forward instead to
+// the next pair boundary. This ensures that in pure-tool conversations the
+// split lands between complete pairs rather than collapsing to index 0.
 func safeSplitIndex(contents []*genai.Content, idx int) int {
 	if idx <= 0 || idx >= len(contents) {
 		return idx
 	}
 
+	origIdx := idx
+
+	idx = walkBackToPairBoundary(contents, idx)
+
+	if idx <= 0 {
+		idx = walkForwardToPairBoundary(contents, origIdx)
+	}
+
+	if idx <= 0 {
+		idx = 1
+	}
+	if idx >= len(contents) {
+		idx = len(contents) - 1
+	}
+
+	return idx
+}
+
+// walkBackToPairBoundary walks backwards from idx looking for a position
+// that is not in the middle of a tool_call/tool_response pair. Returns the
+// adjusted index, or 0 if it exhausted all messages.
+func walkBackToPairBoundary(contents []*genai.Content, idx int) int {
 	for idx > 0 {
 		c := contents[idx]
 		if c == nil {
@@ -381,9 +399,31 @@ func safeSplitIndex(contents []*genai.Content, idx int) int {
 
 		break
 	}
+	return idx
+}
 
-	if idx < 0 {
-		return 0
+// walkForwardToPairBoundary walks forward from idx to the nearest complete
+// tool pair boundary. A pair is [model:FunctionCall, user:FunctionResponse].
+// The function advances past the current incomplete pair and stops right
+// after the tool_response, which is a valid split point (between two pairs).
+func walkForwardToPairBoundary(contents []*genai.Content, idx int) int {
+	for idx < len(contents) {
+		c := contents[idx]
+		if c == nil {
+			break
+		}
+
+		if c.Role == "model" && contentHasFunctionCall(c) {
+			idx++
+			continue
+		}
+
+		if c.Role == "user" && contentHasFunctionResponse(c) {
+			idx++
+			break
+		}
+
+		break
 	}
 	return idx
 }
