@@ -356,12 +356,36 @@ func (m *Model) convertTools(genaiTools []*genai.Tool) ([]anthropic.ToolUnionPar
 			// Type is required by Anthropic API, must be "object"
 			inputSchema.Type = "object"
 			if params != nil {
-				if m, ok := params.(map[string]any); ok {
+				// ParametersJsonSchema is typically *jsonschema.Schema, not map[string]any.
+				// Marshal/unmarshal normalises any concrete type into a plain map so we
+				// can extract fields generically. If it is already a map (e.g. built by
+				// hand in Go) we use it directly to avoid the round-trip.
+				var m map[string]any
+				if dm, ok := params.(map[string]any); ok {
+					m = dm
+				} else {
+					jsonBytes, err := json.Marshal(params)
+					if err == nil {
+						json.Unmarshal(jsonBytes, &m) //nolint:errcheck
+					}
+				}
+				if m != nil {
 					if props, ok := m["properties"]; ok {
 						inputSchema.Properties = props
 					}
-					if req, ok := m["required"].([]string); ok {
+					// After json.Unmarshal, string arrays always arrive as []interface{},
+					// never []string, regardless of the source type. We handle both to be
+					// defensive: []string covers maps built directly in Go without a JSON
+					// round-trip; []interface{} covers the normal unmarshal path.
+					switch req := m["required"].(type) {
+					case []string:
 						inputSchema.Required = req
+					case []interface{}:
+						strs := make([]string, len(req))
+						for i, v := range req {
+							strs[i] = fmt.Sprint(v)
+						}
+						inputSchema.Required = strs
 					}
 				}
 			}
