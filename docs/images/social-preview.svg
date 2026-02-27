@@ -124,12 +124,12 @@
         font-size="20" font-weight="600" fill="#c9960a"
         text-anchor="middle">Artifacts</text>
 
-  <!-- Tag: Compactation -->
+  <!-- Tag: Compaction -->
   <rect x="1104" y="360" width="160" height="42" rx="6" fill="#EA4335" opacity="0.12"/>
   <text x="1184" y="388"
         font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
         font-size="20" font-weight="600" fill="#EA4335"
-        text-anchor="middle">Compactation</text>
+        text-anchor="middle">Compaction</text>
 
   <!-- ========== DECORATIVE SHAPES (right side corners) ========== -->
   <polygon points="1210,30 1235,68 1185,68" fill="#9B59B6" stroke="none"/>
