@@ -12,7 +12,7 @@
   <rect x="0" y="0" width="1280" height="640" fill="url(#dots)"/>
 
   <!-- ========== LOGO (left side) ========== -->
-  <g transform="translate(30, 80) scale(1.0)">
+  <g transform="translate(55, 80) scale(1.0)">
 
     <!-- ROBOTITO (scaled 0.6, centered) -->
     <g transform="translate(256, 256) scale(0.6) translate(-275, -227)">
