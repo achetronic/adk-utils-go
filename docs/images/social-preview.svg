@@ -12,7 +12,7 @@
   <rect x="0" y="0" width="1280" height="640" fill="url(#dots)"/>
 
   <!-- ========== LOGO (left side) ========== -->
-  <g transform="translate(80, 100) scale(1.15)">
+  <g transform="translate(30, 80) scale(1.0)">
 
     <!-- ROBOTITO (scaled 0.6, centered) -->
     <g transform="translate(256, 256) scale(0.6) translate(-275, -227)">
@@ -71,15 +71,15 @@
     <!-- FLOATING SHAPES -->
     <circle cx="256" cy="35" r="6" fill="#EA4335" stroke="none"/>
     <polygon points="70,50 95,90 45,90" fill="#9B59B6" stroke="none"/>
-    <rect x="415" y="50" width="10" height="10" fill="#FBBC04" stroke="none"/>
-    <polygon points="450,100 470,112 470,136 450,148 430,136 430,112" fill="#34A853" stroke="none"/>
+    <rect x="380" y="50" width="10" height="10" fill="#FBBC04" stroke="none"/>
+    <polygon points="410,100 428,112 428,136 410,148 392,136 392,112" fill="#34A853" stroke="none"/>
     <circle cx="55" cy="170" r="5" fill="none" stroke="#4285F4" stroke-width="3"/>
     <path d="M 40,280 L 40,340 M 10,310 L 70,310" fill="none" stroke="#FBBC04" stroke-width="8" stroke-linecap="round"/>
-    <circle cx="460" cy="200" r="12" fill="#EA4335" stroke="none"/>
-    <rect x="435" y="290" width="40" height="40" fill="none" stroke="#9B59B6" stroke-width="5"/>
+    <circle cx="420" cy="200" r="12" fill="#EA4335" stroke="none"/>
+    <rect x="395" y="290" width="40" height="40" fill="none" stroke="#9B59B6" stroke-width="5"/>
     <circle cx="90" cy="430" r="16" fill="#4285F4" stroke="none"/>
     <polygon points="140,460 150,478 130,478" fill="#34A853" stroke="none"/>
-    <circle cx="420" cy="450" r="25" fill="none" stroke="#34A853" stroke-width="5"/>
+    <circle cx="390" cy="450" r="25" fill="none" stroke="#34A853" stroke-width="5"/>
     <rect x="244" y="470" width="24" height="24" fill="none" stroke="#4285F4" stroke-width="4"/>
   </g>
 
