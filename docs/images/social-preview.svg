@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+
+  <!-- Background -->
+  <rect x="0" y="0" width="1280" height="640" fill="#ffffff"/>
+
+  <!-- Subtle grid dots pattern -->
+  <defs>
+    <pattern id="dots" x="0" y="0" width="40" height="40" patternUnits="userSpaceOnUse">
+      <circle cx="20" cy="20" r="1.5" fill="#e8e8e8"/>
+    </pattern>
+  </defs>
+  <rect x="0" y="0" width="1280" height="640" fill="url(#dots)"/>
+
+  <!-- ========== LOGO (left side) ========== -->
+  <g transform="translate(55, 80) scale(1.0)">
+
+    <!-- ROBOTITO (scaled 0.6, centered) -->
+    <g transform="translate(256, 256) scale(0.6) translate(-275, -227)">
+
+      <!-- Head -->
+      <!-- Blue side -->
+      <path d="M 302 235
+               L 195 235
+               A 90 90 0 0 1 195 55
+               L 248 55"
+            fill="none"
+            stroke="#4285F4"
+            stroke-width="32"
+            stroke-linecap="round"/>
+
+      <!-- Green side -->
+      <path d="M 248 55
+               L 355 55
+               A 90 90 0 0 1 355 235
+               L 302 235"
+            fill="none"
+            stroke="#34A853"
+            stroke-width="32"
+            stroke-linecap="round"/>
+
+      <!-- Eyes -->
+      <circle cx="215" cy="145" r="18" fill="#4285F4"/>
+      <circle cx="335" cy="145" r="18" fill="#4285F4"/>
+
+      <!-- Cuerpito -->
+      <!-- Yellow bracket [ (left) -->
+      <path d="M 150 310 L 120 310 L 120 430 L 150 430"
+            fill="none"
+            stroke="#FBBC04"
+            stroke-width="32"
+            stroke-linecap="round"
+            stroke-linejoin="round"/>
+
+      <!-- Red chevron < (center-left) -->
+      <path d="M 250 310 L 200 370 L 250 430"
+            fill="none"
+            stroke="#EA4335"
+            stroke-width="32"
+            stroke-linecap="round"
+            stroke-linejoin="round"/>
+
+      <!-- Red chevron > (right) -->
+      <path d="M 380 310 L 430 370 L 380 430"
+            fill="none"
+            stroke="#EA4335"
+            stroke-width="32"
+            stroke-linecap="round"
+            stroke-linejoin="round"/>
+    </g>
+
+    <!-- FLOATING SHAPES -->
+    <circle cx="256" cy="35" r="6" fill="#EA4335" stroke="none"/>
+    <polygon points="70,50 95,90 45,90" fill="#9B59B6" stroke="none"/>
+    <rect x="380" y="50" width="10" height="10" fill="#FBBC04" stroke="none"/>
+    <polygon points="410,100 428,112 428,136 410,148 392,136 392,112" fill="#34A853" stroke="none"/>
+    <circle cx="55" cy="170" r="5" fill="none" stroke="#4285F4" stroke-width="3"/>
+    <path d="M 40,280 L 40,340 M 10,310 L 70,310" fill="none" stroke="#FBBC04" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="420" cy="200" r="12" fill="#EA4335" stroke="none"/>
+    <rect x="395" y="290" width="40" height="40" fill="none" stroke="#9B59B6" stroke-width="5"/>
+    <circle cx="90" cy="430" r="16" fill="#4285F4" stroke="none"/>
+    <polygon points="140,460 150,478 130,478" fill="#34A853" stroke="none"/>
+    <circle cx="390" cy="450" r="25" fill="none" stroke="#34A853" stroke-width="5"/>
+    <rect x="244" y="470" width="24" height="24" fill="none" stroke="#4285F4" stroke-width="4"/>
+  </g>
+
+  <!-- Vertical divider -->
+  <line x1="620" y1="80" x2="620" y2="560" stroke="#e0e0e0" stroke-width="1.5"/>
+
+  <!-- ========== TEXT (right side) ========== -->
+
+  <!-- Title: adk-utils-go -->
+  <text x="660" y="240"
+        font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="80"
+        font-weight="700"
+        fill="#222222">adk-utils-go</text>
+
+  <!-- Slogan -->
+  <text x="664" y="305"
+        font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="28"
+        font-weight="400"
+        fill="#666666">Tools to supercharge your ADK agents</text>
+
+  <!-- Tags row -->
+  <!-- Tag: Providers -->
+  <rect x="664" y="360" width="154" height="42" rx="6" fill="#4285F4" opacity="0.12"/>
+  <text x="741" y="388"
+        font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="20" font-weight="600" fill="#4285F4"
+        text-anchor="middle">Providers</text>
+
+  <!-- Tag: Memory -->
+  <rect x="830" y="360" width="120" height="42" rx="6" fill="#34A853" opacity="0.12"/>
+  <text x="890" y="388"
+        font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="20" font-weight="600" fill="#34A853"
+        text-anchor="middle">Memory</text>
+
+  <!-- Tag: Artifacts -->
+  <rect x="962" y="360" width="130" height="42" rx="6" fill="#FBBC04" opacity="0.18"/>
+  <text x="1027" y="388"
+        font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="20" font-weight="600" fill="#c9960a"
+        text-anchor="middle">Artifacts</text>
+
+  <!-- Tag: Compaction -->
+  <rect x="1104" y="360" width="160" height="42" rx="6" fill="#EA4335" opacity="0.12"/>
+  <text x="1184" y="388"
+        font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="20" font-weight="600" fill="#EA4335"
+        text-anchor="middle">Compaction</text>
+
+  <!-- ========== DECORATIVE SHAPES (right side corners) ========== -->
+  <polygon points="1210,30 1235,68 1185,68" fill="#9B59B6" stroke="none"/>
+  <circle cx="1260" cy="180" r="10" fill="#EA4335" stroke="none"/>
+  <rect x="1235" y="430" width="22" height="22" fill="none" stroke="#FBBC04" stroke-width="4"/>
+  <polygon points="1180,590 1198,600 1198,620 1180,630 1162,620 1162,600" fill="#34A853" stroke="none"/>
+  <circle cx="860" cy="30" r="7" fill="none" stroke="#4285F4" stroke-width="3"/>
+  <circle cx="50" cy="610" r="8" fill="#EA4335" stroke="none"/>
+  <polygon points="590,570 605,598 575,598" fill="#FBBC04" stroke="none"/>
+
+</svg>
