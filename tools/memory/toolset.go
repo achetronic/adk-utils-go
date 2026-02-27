@@ -134,7 +134,7 @@ func (ts *Toolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 // SearchArgs are the arguments for the search_memory tool.
 type SearchArgs struct {
-	Query string `json:"query"`
+	Query string `json:"query" jsonschema:"Natural language query describing what information to look for in memory. Be specific and descriptive for best results."`
 }
 
 // SearchResult is the result of the search_memory tool.
@@ -216,8 +216,8 @@ func (ts *Toolset) searchMemory(ctx tool.Context, args SearchArgs) (SearchResult
 
 // SaveArgs are the arguments for the save_to_memory tool.
 type SaveArgs struct {
-	Content  string `json:"content"`
-	Category string `json:"category,omitempty"`
+	Content  string `json:"content" jsonschema:"The information to save to memory. Write it as a clear, self-contained statement that will be meaningful when retrieved later."`
+	Category string `json:"category,omitempty" jsonschema:"Optional label to categorize the memory (e.g. 'preference', 'fact', 'task'). Helps organize and retrieve related memories."`
 }
 
 // SaveResult is the result of the save_to_memory tool.
@@ -261,8 +261,8 @@ func (ts *Toolset) saveToMemory(ctx tool.Context, args SaveArgs) (SaveResult, er
 
 // UpdateArgs are the arguments for the update_memory tool.
 type UpdateArgs struct {
-	ID      int    `json:"id"`
-	Content string `json:"content"`
+	ID      int    `json:"id" jsonschema:"Numeric ID of the memory entry to update, obtained from the id field in search_memory results."`
+	Content string `json:"content" jsonschema:"The new content to replace the existing memory entry. Write it as a clear, self-contained statement."`
 }
 
 // UpdateResult is the result of the update_memory tool.
@@ -302,7 +302,7 @@ func (ts *Toolset) updateMemory(ctx tool.Context, args UpdateArgs) (UpdateResult
 
 // DeleteArgs are the arguments for the delete_memory tool.
 type DeleteArgs struct {
-	ID int `json:"id"`
+	ID int `json:"id" jsonschema:"Numeric ID of the memory entry to delete, obtained from the id field in search_memory results."`
 }
 
 // DeleteResult is the result of the delete_memory tool.
