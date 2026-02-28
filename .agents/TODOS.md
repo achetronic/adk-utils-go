@@ -28,33 +28,16 @@ Rewrote `safeSplitIndex` with a two-phase approach:
 
 This means pure-tool conversations now split between pairs instead of collapsing to index 0/1.
 
-### Simulation results (before → after)
-
-| Scenario | Before | After |
-|---|---|---|
-| tool-storm-20x2k / 8k ctx | old=1, -0.1%, NO fit | old=39, 94.9%, YES fit |
-| tool-storm-50x5k / 32k ctx | old=1, -0.0%, NO fit | old=99, 98.0%, YES fit |
-| tool-storm-50x5k / sw=10 | old=1, -0.0% | old=99, 98.0%, YES fit |
-| tool-storm-50x5k / sw=30 | old=1, -0.0% | old=99, 98.0%, YES fit |
-
 ---
 
 ## ~~Proposal 2: Iterative compaction (retry loop)~~
 
-**Status**: Implemented  
-**Package**: `plugin/contextguard`  
-**Files**: `compaction_threshold.go`, `compaction_sliding_window.go`, `contextguard.go`
+**Status**: Implemented then removed  
+**Package**: `plugin/contextguard`
 
 ### What was done
 
-Both `thresholdStrategy.Compact` and `slidingWindowStrategy.Compact` now retry compaction up to `maxCompactionAttempts` (3) if tokens still exceed the threshold after the first pass:
-
-- **Threshold**: halves `recentBudget` each retry, forcing the split point earlier.
-- **Sliding window**: halves `recentKeep` each retry (min 3), keeping fewer recent messages.
-- Each retry calls the LLM for summarization, accumulating the summary.
-- Aborts early if `oldContents` is empty (nothing left to compact).
-
-Added `maxCompactionAttempts = 3` constant to `contextguard.go`.
+Originally added a retry loop that halved `recentBudget` each pass. **Removed** when the threshold strategy moved to full-summary mode (Proposal 5) — with no recent tail, there is nothing to shrink, so retry is unnecessary. The sliding window strategy still retries with a progressively smaller `recentKeep`.
 
 ---
 
@@ -70,99 +53,172 @@ Extracted `estimatePartTokens(part *genai.Part) int` helper that counts Text + F
 
 ---
 
-## Proposal 3: Truncate giant tool_responses before summarization and in recent window
+## ~~Proposal 3: Truncate giant tool_responses before summarization and in recent window~~
 
-**Priority**: Medium (deferred — will implement in a future version)  
-**Investigation**: See [INVESTIGATION_RESULTS.md](./INVESTIGATION_RESULTS.md) for full data  
-**Package**: `plugin/contextguard`  
-**Files**: `compaction_utils.go` (new helper + changes to `summarize` and `replaceSummary`)
+**Status**: No longer needed  
+**Priority**: Was Medium (deferred)  
+**Investigation**: See [INVESTIGATION_RESULTS.md](./INVESTIGATION_RESULTS.md) for the original data
 
-### Problem
+### Why it's no longer needed
 
-A single `kubectl get pods -A -o json` can produce 200k+ chars (~50k tokens). This causes two problems:
-
-1. **Summarization input is too large**: the LLM called for summarization also has a context limit and can't process 200k chars of JSON.
-2. **Recent messages are untouched**: even after compaction, the "recent" portion keeps the full giant responses, defeating the purpose.
-
-Simulation shows `kube-3rounds / 8k ctx` compacts 66.4% but still doesn't fit (8101 > 6400 threshold) because the remaining 8 recent messages include huge tool responses.
-
-### Proposed solution
-
-Two truncation points:
-
-**A) Before summarization** — truncate tool_responses in `oldContents` before passing to `summarize()`:
-
-```go
-func truncateForSummarization(contents []*genai.Content, maxCharsPerResponse int) []*genai.Content {
-    // Deep copy, truncate FunctionResponse.Response values > maxCharsPerResponse
-    // Append "[truncated from X chars]" indicator
-}
-```
-
-**B) In recent window** — optionally truncate oversized tool_responses in `recentContents`. Opt-in via `WithMaxToolResponseSize(n)`.
-
-### Suggested defaults
-
-| Parameter | Default | Rationale |
-|---|---|---|
-| Summarization truncation | 2,000 chars | Enough for tool name, key fields, errors |
-| Recent window truncation | disabled | Preserve full context by default; user opts in |
-
-### Remaining simulation gap
-
-| Scenario | Current result | With Proposal 3 (estimated) |
-|---|---|---|
-| kube-3rounds / 8k ctx | 8101 tokens, NO fit | ~2k tokens, YES fit |
+Proposal 3 was designed to solve the problem of oversized tool responses living in the **recent tail** after compaction. With full-summary mode (Proposal 5), there is no recent tail — everything is summarized. The summarization prompt itself doesn't include raw tool response payloads either (tool results are rendered as `[tool X returned a result]`). So the problem this proposal addressed no longer exists.
 
 ---
 
-## Proposal 5: Crush-style token threshold compaction
+## ~~Proposal 5: Crush-style compaction~~
 
-**Priority**: High  
+**Status**: Implemented  
+**Branch**: `feat/crush-style-compaction`  
 **Package**: `plugin/contextguard`  
-**Files**: `contextguard.go`, `compaction_threshold.go`, `compaction_utils.go`
+**Files**: `contextguard.go`, `compaction_threshold.go`, `compaction_utils.go`, `contextguard_test.go`, `compaction_simulation_test.go`
 
 ### Problem
 
-The current threshold strategy uses a `len(text)/4` heuristic to estimate tokens. This significantly underestimates token usage for structured content (JSON tool calls, markdown, etc.) — the real ratio is often ~3 chars/token or less. As a result, the LLM rejects requests for exceeding its context window **before** ContextGuard's estimate reaches the compaction threshold, so compaction never fires.
+The original threshold strategy had two critical flaws:
 
-Crush CLI (github.com/charmbracelet/crush) solves this by using **real token counts** reported by the provider after each LLM call, which are always accurate.
+1. **`len(text)/4` heuristic drastically underestimates real token counts** for structured content (JSON, markdown, non-ASCII). The compaction threshold was never reached before Anthropic rejected the request for exceeding its context window.
+2. **Keeping a "recent tail"** after compaction meant oversized tool responses in the tail could still overflow the context window. The retry loop couldn't help because it only re-compacted already-compacted content — the recent window was untouched.
 
-### Proposed changes
+Crush CLI (github.com/charmbracelet/crush) solves both by using real provider token counts and summarizing everything.
 
-#### 1. Use real token counts instead of `len/4` heuristic
+### What was implemented
 
-ADK's `AfterModelCallback` receives `LLMResponse.UsageMetadata` with `PromptTokenCount` and `CandidatesTokenCount`, populated by both the OpenAI and Anthropic adapters in adk-utils-go. The plan:
+#### 5.1: Real token counts via `AfterModelCallback`
 
-- Add an `AfterModelCallback` to the plugin that persists the latest `PromptTokenCount + CandidatesTokenCount` into session state after each LLM call.
-- In `BeforeModelCallback`, read the accumulated token count from state instead of calling `estimateTokens()`.
-- Fall back to `len/4` only if `UsageMetadata` is nil (e.g. first turn, or provider doesn't report usage).
+ADK's `AfterModelCallback` receives `LLMResponse.UsageMetadata.PromptTokenCount`, populated by both the OpenAI and Anthropic adapters in adk-utils-go. The implementation:
 
-Note: `PromptTokenCount` already includes the full conversation, so the last turn's `PromptTokenCount` is sufficient — no need to accumulate across turns.
+- `AfterModelCallback` persists `PromptTokenCount` to session state after each LLM call (filtering out streaming partials via `resp.Partial` and nil `UsageMetadata`).
+- `BeforeModelCallback` persists the heuristic estimate of the final request (after any compaction) so the next call can compute a calibration factor.
+- `tokenCount()` uses a calibrated heuristic (see "Timing gap" section below).
+- Falls back to `heuristic × 1.5` if no real tokens are available (first turn).
 
-#### 2. Summarize everything instead of keeping a recent tail
+Only `PromptTokenCount` is stored — not the sum with `CandidatesTokenCount` — because `PromptTokenCount` already represents the full conversation size the LLM received.
 
-Crush summarizes the **entire** conversation and restarts with just `[summary]`. The current ContextGuard keeps ~20% of the context window as verbatim recent messages. Consider offering a mode (opt-in or default) that summarizes all contents, since the recent tail can itself contain oversized tool responses that defeat compaction (see also Proposal 3).
+#### 5.2: Full summary mode (always, not opt-in)
 
-#### 3. Inject continuation context after compaction
+The threshold strategy always summarizes the **entire** conversation. No recent tail is preserved. After compaction, `req.Contents` is exactly `[summary] + [continuation]` — 2 messages. This matches Crush CLI behavior and eliminates the problem of oversized recent messages.
 
-After compaction, Crush injects the user's original prompt wrapped with `"The previous session was interrupted because it got too long, the initial user request was: ..."` and appends a continuation instruction. ContextGuard could do the same by appending a user message to `req.Contents` after `replaceSummary()`. `CallbackContext.UserContent()` provides the latest user message.
+`WithFullSummary()` was initially implemented as an opt-in option, then made the only behavior. The option, the `fullSummary` field, `splitContents()`, `initialRecentBudget()`, `recentWindowRatio`, and the retry loop were all removed from the threshold strategy.
 
-#### 4. Preserve todos in the summary prompt
+#### 5.3: Continuation context injection
 
-Crush's `buildSummaryPrompt()` reads the todo list and includes it in the summarization request with an instruction to restore it via the `todos` tool. ContextGuard could read todos from `CallbackContext.State()` and inject them into the summarization prompt, ensuring task continuity across compaction boundaries.
+After compaction, a continuation message is appended to `req.Contents`:
 
-### Impact assessment
+```
+[System: The conversation was compacted because it exceeded the context window.
+The summary above contains all prior context. The user's current request is:
+`<original user message>`. Continue working on this request without asking
+the user to repeat anything.]
+```
 
-| Change | Effort | Impact |
-|---|---|---|
-| Real token counts via `AfterModelCallback` | Medium | **Critical** — fixes compaction never firing |
-| Summarize everything (no recent tail) | Low | Prevents oversized recent messages from defeating compaction |
-| Continuation context injection | Low | Better task continuity after compaction |
-| Todo preservation | Low | Prevents loss of task tracking state |
+`CallbackContext.UserContent()` provides the latest user message. If unavailable, a generic continuation instruction is used.
 
-### Reference
+#### 5.4: Todo preservation in summarization prompt
+
+When compaction fires, `loadTodos()` reads the todo list from session state (key `"todos"`) and appends it to the summarization prompt:
+
+```
+[Current todo list]
+- [in_progress] Analyze timing gap
+- [completed] Implement real token counts
+[End todo list]
+
+Include these tasks and their statuses in your summary under a dedicated
+"## Todo List" section. Instruct the resuming assistant to restore them
+using the `todos` tool to continue tracking progress.
+```
+
+Supports both `[]TodoItem` and `[]any` (from JSON deserialization).
+
+### Timing gap analysis and calibrated heuristic
+
+#### The problem
+
+ContextGuard checks tokens in `BeforeModelCallback` but gets real token counts in `AfterModelCallback` — one step behind. Between the two callbacks, tool results are appended to the conversation. If a tool returns a massive response, the request sent to the LLM will be larger than the last measured `PromptTokenCount`.
+
+Crush CLI doesn't have this problem because it checks *after* each step completes (with fresh token counts) and stops *before* the next LLM call. ADK only offers before/after callbacks — there is no `StopWhen` mechanism.
+
+#### The solution: calibrated heuristic
+
+Both the real token count and the heuristic estimate are persisted at each step:
+
+| Callback | What is persisted | Purpose |
+|----------|------------------|---------|
+| `BeforeModelCallback` | `lastHeuristic` = `estimateTokens(req)` after compaction | Calibration baseline |
+| `AfterModelCallback` | `realTokens` = `PromptTokenCount` from provider | Ground truth |
+
+On the next `BeforeModelCallback`, `tokenCount()` computes:
+
+```
+currentHeuristic = estimateTokens(req)            // reflects current request including new tool results
+correction = max(1.0, realTokens / lastHeuristic)  // how much len/4 underestimated last time
+calibrated = currentHeuristic × correction          // apply correction to current estimate
+return max(realTokens, calibrated)                  // never undercount
+```
+
+This means:
+- If tools added tokens, `currentHeuristic` grows, and the correction factor scales it to real-token space.
+- If the request didn't grow, `realTokens` from the last call is still the dominant value.
+- The correction factor is floored at 1.0 — the calibrated estimate is never less than the raw heuristic.
+- If no real tokens are available (first turn), the default factor of 1.5 is used.
+
+#### Proof via simulation tests
+
+`TestTimingGap_CalibratedHeuristicPreventsOverflow`:
+- Step N: heuristic=70k, real=140k (correction=2.0)
+- Tool adds 80k chars → Step N+1: heuristic=90k
+- Old `tokenCount()`: returns 140k (stale) → below 180k threshold → **no compaction → overflow**
+- New `tokenCount()`: returns 180k (calibrated = 90k × 2.0) → above threshold → **compaction fires**
+
+`TestTimingGap_MassiveToolResponse`:
+- 400k-char tool response between steps
+- Calibrated estimate = 300k → correctly triggers compaction on a 200k window
+
+### What the summarization flow looks like
+
+**Input to summarization LLM** (separate call from the agent's normal LLM):
+
+System prompt: structured instructions for producing a summary with sections (Current State, Key Information, Context & Decisions, Exact Next Steps), plus a dynamic word limit based on the buffer size.
+
+User prompt: the entire conversation rendered as text:
+```
+user: Revisa los pods
+model: [called tool: kubectl_get_pods]
+user: [tool kubectl_get_pods returned a result]
+model: Hay 40 pods running...
+```
+
+Note: tool results are rendered as `[tool X returned a result]` — raw payloads are not included. This keeps the summarization input manageable regardless of tool response size.
+
+**Output**: a structured summary of ~buffer×0.50 tokens max.
+
+**Final `req.Contents` sent to the agent's LLM**:
+```
+[user: "[Previous conversation summary]\n<summary>\n[End of summary — conversation continues below]"]
+[user: "[System: The conversation was compacted... The user's current request is: `...`. Continue working...]"]
+```
+
+From ~140k tokens down to ~10k. The agent continues seamlessly.
+
+### Test coverage
+
+93 tests total, including:
+- `TestPersistAndLoadRealTokens`, `TestLoadRealTokens_Float64Conversion`
+- `TestTokenCount_PrefersRealTokens`, `TestTokenCount_CalibratedHeuristic`, `TestTokenCount_CorrectionFloorAtOne`, `TestTokenCount_RealTokensWinWhenLarger`
+- `TestPersistAndLoadLastHeuristic`
+- `TestAfterModel_PersistsTokenCount`, `TestAfterModel_NilUsageMetadata`, `TestAfterModel_SkipsPartials`, `TestAfterModel_UnknownAgent`
+- `TestThresholdStrategy_UsesRealTokens`, `TestThresholdStrategy_RealTokens_TriggersWhereHeuristicFails`
+- `TestThresholdStrategy_NoRecentTail`
+- `TestInjectContinuation_WithUserContent`, `TestInjectContinuation_NilUserContent`, `TestThresholdStrategy_InjectsContinuation`
+- `TestLoadTodos_Empty`, `TestLoadTodos_TypedSlice`, `TestLoadTodos_MapSlice`
+- `TestBuildSummarizePrompt_WithTodos`, `TestBuildSummarizePrompt_WithoutTodos`
+- `TestPluginConfig_HasAfterModelCallback`
+- `TestTimingGap_CalibratedHeuristicPreventsOverflow`, `TestTimingGap_MassiveToolResponse`
+
+### References
 
 - Crush CLI compaction: `internal/agent/agent.go` — `Summarize()`, `getSessionMessages()`, `buildSummaryPrompt()`
 - ADK `AfterModelCallback` signature: `func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)`
 - ADK `UsageMetadata`: `genai.GenerateContentResponseUsageMetadata.PromptTokenCount`, `.CandidatesTokenCount`
+- ADK callback ordering: `internal/llminternal/base_flow.go` — `preprocess → BeforeModelCallback → LLM → AfterModelCallback → tools → loop`
+- ADK state persistence: `ctx.State().Set()` dual-writes to `stateDelta` and `Session().State()` — immediately visible across callbacks within the same session
