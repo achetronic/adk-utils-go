@@ -66,13 +66,20 @@ const (
 	stateKeyPrefixSummary              = "__context_guard_summary_"
 	stateKeyPrefixSummarizedAt         = "__context_guard_summarized_at_"
 	stateKeyPrefixContentsAtCompaction = "__context_guard_contents_at_compaction_"
+	stateKeyPrefixRealTokens           = "__context_guard_real_tokens_"
+	stateKeyPrefixLastHeuristic        = "__context_guard_last_heuristic_"
 
 	largeContextWindowThreshold = 200_000
 	largeContextWindowBuffer    = 20_000
 	smallContextWindowRatio     = 0.20
-	recentWindowRatio           = 0.20
 
 	maxCompactionAttempts = 3
+
+	// defaultHeuristicCorrectionFactor is applied to the len/4 heuristic
+	// when no real token data is available for calibration. The value 1.5
+	// assumes the heuristic underestimates by ~33%, which is conservative
+	// enough to trigger compaction early rather than risk overflow.
+	defaultHeuristicCorrectionFactor = 1.5
 )
 
 const defaultMaxTurns = 20
@@ -162,6 +169,7 @@ func (g *ContextGuard) PluginConfig() runner.PluginConfig {
 	p, _ := plugin.New(plugin.Config{
 		Name:                "context_guard",
 		BeforeModelCallback: llmagent.BeforeModelCallback(guard.beforeModel),
+		AfterModelCallback:  llmagent.AfterModelCallback(guard.afterModel),
 	})
 
 	return runner.PluginConfig{
@@ -177,6 +185,9 @@ type contextGuard struct {
 
 // beforeModel is the BeforeModelCallback invoked by ADK before every LLM
 // call. It looks up the agent's strategy and delegates compaction to it.
+// After compaction (or pass-through), it persists the heuristic token
+// estimate of the final request so that the next call can compute a
+// calibration factor between real and heuristic counts.
 func (g *contextGuard) beforeModel(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 	if req == nil || len(req.Contents) == 0 {
 		return nil, nil
@@ -195,5 +206,32 @@ func (g *contextGuard) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 		)
 	}
 
+	persistLastHeuristic(ctx, estimateTokens(req))
+
+	return nil, nil
+}
+
+// afterModel is the AfterModelCallback invoked by ADK after every LLM
+// response, including streaming partials. Only the final (non-partial)
+// response carries UsageMetadata, so partials are skipped.
+//
+// Only PromptTokenCount is stored: it reflects the full conversation size
+// that the LLM received, which is the value to compare against the context
+// window threshold. CandidatesTokenCount (the model's output) will become
+// part of the next turn's prompt automatically.
+func (g *contextGuard) afterModel(ctx agent.CallbackContext, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+	if resp == nil || resp.Partial {
+		return nil, nil
+	}
+	if resp.UsageMetadata == nil {
+		return nil, nil
+	}
+	if _, ok := g.strategies[ctx.AgentName()]; !ok {
+		return nil, nil
+	}
+	promptTokens := int(resp.UsageMetadata.PromptTokenCount)
+	if promptTokens > 0 {
+		persistRealTokens(ctx, promptTokens)
+	}
 	return nil, nil
 }

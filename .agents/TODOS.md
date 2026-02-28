@@ -113,3 +113,56 @@ func truncateForSummarization(contents []*genai.Content, maxCharsPerResponse int
 | Scenario | Current result | With Proposal 3 (estimated) |
 |---|---|---|
 | kube-3rounds / 8k ctx | 8101 tokens, NO fit | ~2k tokens, YES fit |
+
+---
+
+## Proposal 5: Crush-style token threshold compaction
+
+**Priority**: High  
+**Package**: `plugin/contextguard`  
+**Files**: `contextguard.go`, `compaction_threshold.go`, `compaction_utils.go`
+
+### Problem
+
+The current threshold strategy uses a `len(text)/4` heuristic to estimate tokens. This significantly underestimates token usage for structured content (JSON tool calls, markdown, etc.) — the real ratio is often ~3 chars/token or less. As a result, the LLM rejects requests for exceeding its context window **before** ContextGuard's estimate reaches the compaction threshold, so compaction never fires.
+
+Crush CLI (github.com/charmbracelet/crush) solves this by using **real token counts** reported by the provider after each LLM call, which are always accurate.
+
+### Proposed changes
+
+#### 1. Use real token counts instead of `len/4` heuristic
+
+ADK's `AfterModelCallback` receives `LLMResponse.UsageMetadata` with `PromptTokenCount` and `CandidatesTokenCount`, populated by both the OpenAI and Anthropic adapters in adk-utils-go. The plan:
+
+- Add an `AfterModelCallback` to the plugin that persists the latest `PromptTokenCount + CandidatesTokenCount` into session state after each LLM call.
+- In `BeforeModelCallback`, read the accumulated token count from state instead of calling `estimateTokens()`.
+- Fall back to `len/4` only if `UsageMetadata` is nil (e.g. first turn, or provider doesn't report usage).
+
+Note: `PromptTokenCount` already includes the full conversation, so the last turn's `PromptTokenCount` is sufficient — no need to accumulate across turns.
+
+#### 2. Summarize everything instead of keeping a recent tail
+
+Crush summarizes the **entire** conversation and restarts with just `[summary]`. The current ContextGuard keeps ~20% of the context window as verbatim recent messages. Consider offering a mode (opt-in or default) that summarizes all contents, since the recent tail can itself contain oversized tool responses that defeat compaction (see also Proposal 3).
+
+#### 3. Inject continuation context after compaction
+
+After compaction, Crush injects the user's original prompt wrapped with `"The previous session was interrupted because it got too long, the initial user request was: ..."` and appends a continuation instruction. ContextGuard could do the same by appending a user message to `req.Contents` after `replaceSummary()`. `CallbackContext.UserContent()` provides the latest user message.
+
+#### 4. Preserve todos in the summary prompt
+
+Crush's `buildSummaryPrompt()` reads the todo list and includes it in the summarization request with an instruction to restore it via the `todos` tool. ContextGuard could read todos from `CallbackContext.State()` and inject them into the summarization prompt, ensuring task continuity across compaction boundaries.
+
+### Impact assessment
+
+| Change | Effort | Impact |
+|---|---|---|
+| Real token counts via `AfterModelCallback` | Medium | **Critical** — fixes compaction never firing |
+| Summarize everything (no recent tail) | Low | Prevents oversized recent messages from defeating compaction |
+| Continuation context injection | Low | Better task continuity after compaction |
+| Todo preservation | Low | Prevents loss of task tracking state |
+
+### Reference
+
+- Crush CLI compaction: `internal/agent/agent.go` — `Summarize()`, `getSessionMessages()`, `buildSummaryPrompt()`
+- ADK `AfterModelCallback` signature: `func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)`
+- ADK `UsageMetadata`: `genai.GenerateContentResponseUsageMetadata.PromptTokenCount`, `.CandidatesTokenCount`

@@ -86,6 +86,8 @@ func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LL
 	buffer := computeBuffer(contextWindow)
 	threshold := contextWindow - buffer
 
+	userContent := ctx.UserContent()
+	todos := loadTodos(ctx)
 	recentKeep := max(3, s.maxTurns*30/100)
 
 	for attempt := range maxCompactionAttempts {
@@ -101,7 +103,7 @@ func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LL
 			break
 		}
 
-		summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer)
+		summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer, todos)
 		if err != nil {
 			slog.Error("ContextGuard [sliding_window]: summarization FAILED",
 				"agent", ctx.AgentName(),
@@ -117,6 +119,7 @@ func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LL
 		persistContentsAtCompaction(ctx, totalContents)
 
 		replaceSummary(req, summary, recentContents)
+		injectContinuation(req, userContent)
 
 		newTokens := estimateTokens(req)
 

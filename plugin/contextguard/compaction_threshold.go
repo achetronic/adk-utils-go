@@ -24,8 +24,16 @@ import (
 )
 
 // thresholdStrategy implements token-based compaction. It estimates total
-// tokens before every LLM call and summarizes the older portion of the
-// conversation when remaining capacity drops below a safety buffer.
+// tokens before every LLM call and summarizes the entire conversation
+// when remaining capacity drops below a safety buffer.
+//
+// When real token counts are available from the provider (persisted by the
+// AfterModelCallback), they are preferred over the len/4 heuristic. A
+// calibrated heuristic bridges the timing gap between callbacks so that
+// tool results added after the last LLM call are accounted for.
+//
+// Compaction always produces a full summary (no recent tail preserved),
+// matching Crush CLI behaviour. The result is [summary] + [continuation].
 type thresholdStrategy struct {
 	registry  ModelRegistry
 	llm       model.LLM
@@ -49,10 +57,10 @@ func (s *thresholdStrategy) Name() string {
 }
 
 // Compact checks the token estimate against the model's context window and,
-// if the threshold is exceeded, splits the conversation into old + recent,
-// summarizes the old portion, and rewrites req.Contents in place. If a single
-// pass is not enough, it retries with a progressively smaller recent budget
-// (up to maxCompactionAttempts).
+// if the threshold is exceeded, summarizes the entire conversation and
+// rewrites req.Contents to [summary] + [continuation instruction].
+//
+// Token source priority: calibrated heuristic > stale real tokens > raw heuristic.
 func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMRequest) error {
 	var contextWindow int
 	if s.maxTokens > 0 {
@@ -68,7 +76,7 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 		injectSummary(req, existingSummary)
 	}
 
-	totalTokens := estimateTokens(req)
+	totalTokens := tokenCount(ctx, req)
 	if totalTokens < threshold {
 		return nil
 	}
@@ -86,58 +94,27 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	recentBudget := int(float64(contextWindow) * recentWindowRatio)
+	userContent := ctx.UserContent()
+	todos := loadTodos(ctx)
 
-	for attempt := range maxCompactionAttempts {
-		splitIdx := findSplitIndex(req.Contents, recentBudget)
-
-		oldContents := req.Contents[:splitIdx]
-		recentContents := req.Contents[splitIdx:]
-
-		if len(oldContents) == 0 {
-			slog.Warn("ContextGuard [threshold]: nothing to compact (split at 0), aborting",
-				"agent", ctx.AgentName(),
-				"attempt", attempt+1,
-			)
-			break
-		}
-
-		summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer)
-		if err != nil {
-			return fmt.Errorf("summarization failed: %w", err)
-		}
-
-		existingSummary = summary
-		persistSummary(ctx, summary, totalTokens)
-		replaceSummary(req, summary, recentContents)
-
-		newTokens := estimateTokens(req)
-
-		slog.Info("ContextGuard [threshold]: compaction pass completed",
-			"agent", ctx.AgentName(),
-			"session", ctx.SessionID(),
-			"attempt", attempt+1,
-			"oldMessages", len(oldContents),
-			"recentMessages", len(recentContents),
-			"newTokenEstimate", newTokens,
-			"threshold", threshold,
-		)
-
-		if newTokens < threshold {
-			break
-		}
-
-		if attempt < maxCompactionAttempts-1 {
-			recentBudget /= 2
-			slog.Warn("ContextGuard [threshold]: still above threshold, retrying with tighter budget",
-				"agent", ctx.AgentName(),
-				"attempt", attempt+1,
-				"newBudget", recentBudget,
-				"tokens", newTokens,
-				"threshold", threshold,
-			)
-		}
+	summary, err := summarize(ctx, s.llm, req.Contents, existingSummary, buffer, todos)
+	if err != nil {
+		return fmt.Errorf("summarization failed: %w", err)
 	}
+
+	persistSummary(ctx, summary, totalTokens)
+	replaceSummary(req, summary, nil)
+	injectContinuation(req, userContent)
+
+	newTokens := estimateTokens(req)
+
+	slog.Info("ContextGuard [threshold]: compaction completed",
+		"agent", ctx.AgentName(),
+		"session", ctx.SessionID(),
+		"oldMessages", len(req.Contents),
+		"newTokenEstimate", newTokens,
+		"threshold", threshold,
+	)
 
 	return nil
 }

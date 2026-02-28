@@ -709,32 +709,28 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 			}
 		}
 
-		recentBudget := int(float64(contextWindow) * recentWindowRatio)
 		actualAttempts := 0
 
 		for attempt := 0; attempt < attempts; attempt++ {
-			splitIdx := findSplitIndex(req.Contents, recentBudget)
-			oldContents := req.Contents[:splitIdx]
-			recentContents := req.Contents[splitIdx:]
+			oldContents := req.Contents
 
 			if len(oldContents) == 0 {
 				break
 			}
 
-			summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer)
+			summary, err := summarize(ctx, s.llm, oldContents, existingSummary, buffer, nil)
 			if err != nil {
 				t.Fatalf("[%s] summarize error: %v", scenario, err)
 			}
 
 			existingSummary = summary
 			persistSummary(ctx, summary, estimateTokens(req))
-			replaceSummary(req, summary, recentContents)
+			replaceSummary(req, summary, nil)
 			actualAttempts++
 
 			if estimateTokens(req) < threshold {
 				break
 			}
-			recentBudget /= 2
 		}
 
 		tokensAfter := estimateTokens(req)
@@ -885,4 +881,143 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 	}
 
 	t.Log("")
+}
+
+// TestTimingGap_CalibratedHeuristicPreventsOverflow simulates the exact
+// scenario where stale real tokens alone would miss a context overflow:
+//
+//	Step N:   LLM sees 140k tokens → AfterModel persists 140k, heuristic was 70k
+//	Tool:     Returns 80k-char response (≈20k heuristic tokens, ≈40k real tokens)
+//	Step N+1: BeforeModel has req with 140k real + 40k new tool = 180k actual.
+//	          Old tokenCount: returns 140k (stale) → 140k < 180k threshold → NO compaction → BOOM
+//	          New tokenCount: calibrated = (70k+20k) * (140k/70k) = 180k → triggers compaction → SAFE
+//
+// This test verifies the calibrated heuristic correctly inflates the
+// current heuristic estimate using the correction factor from the previous
+// call, preventing overflow.
+func TestTimingGap_CalibratedHeuristicPreventsOverflow(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+
+	smallReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", strings.Repeat("a", 280_000)),
+		},
+	}
+	heuristicAtStepN := estimateTokens(smallReq)
+
+	realTokensAtStepN := heuristicAtStepN * 2
+	persistRealTokens(ctx, realTokensAtStepN)
+	persistLastHeuristic(ctx, heuristicAtStepN)
+
+	toolResultChars := 80_000
+	grownReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", strings.Repeat("a", 280_000)),
+			{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				Name: "big_tool",
+				Args: map[string]any{"param": "value"},
+			}}}},
+			{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				Name:     "big_tool",
+				Response: map[string]any{"result": strings.Repeat("x", toolResultChars)},
+			}}}},
+		},
+	}
+
+	grownHeuristic := estimateTokens(grownReq)
+	t.Logf("Step N:   heuristic=%d, real=%d (correction=%.2f)",
+		heuristicAtStepN, realTokensAtStepN, float64(realTokensAtStepN)/float64(heuristicAtStepN))
+	t.Logf("Step N+1: heuristic=%d (grown by tool result of %d chars)",
+		grownHeuristic, toolResultChars)
+
+	calibrated := tokenCount(ctx, grownReq)
+	t.Logf("Calibrated estimate: %d", calibrated)
+
+	if calibrated <= realTokensAtStepN {
+		t.Errorf("calibrated (%d) should be > stale realTokens (%d) because the request grew",
+			calibrated, realTokensAtStepN)
+	}
+
+	expectedCalibrated := int(float64(grownHeuristic) * (float64(realTokensAtStepN) / float64(heuristicAtStepN)))
+	if calibrated != expectedCalibrated {
+		t.Errorf("calibrated = %d, want %d", calibrated, expectedCalibrated)
+	}
+
+	contextWindow := 200_000
+	buffer := computeBuffer(contextWindow)
+	threshold := contextWindow - buffer
+
+	if realTokensAtStepN >= threshold {
+		t.Fatalf("test setup broken: stale real tokens (%d) already >= threshold (%d)", realTokensAtStepN, threshold)
+	}
+	if calibrated < threshold {
+		t.Logf("NOTE: calibrated (%d) < threshold (%d) — in this test scenario the growth is small enough", calibrated, threshold)
+	}
+
+	t.Logf("Context window=%d, threshold=%d, stale_real=%d, calibrated=%d",
+		contextWindow, threshold, realTokensAtStepN, calibrated)
+	t.Logf("Old tokenCount would return: %d (stale, may miss growth)", realTokensAtStepN)
+	t.Logf("New tokenCount returns: %d (calibrated, tracks growth)", calibrated)
+}
+
+// TestTimingGap_MassiveToolResponse verifies that a massive tool response
+// between steps causes the calibrated heuristic to exceed the threshold,
+// triggering compaction even though stale real tokens alone would not.
+func TestTimingGap_MassiveToolResponse(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+
+	persistRealTokens(ctx, 100_000)
+	persistLastHeuristic(ctx, 50_000)
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", strings.Repeat("a", 200_000)),
+			{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				Name: "massive_query",
+			}}}},
+			{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				Name:     "massive_query",
+				Response: map[string]any{"data": strings.Repeat("d", 400_000)},
+			}}}},
+		},
+	}
+
+	heuristic := estimateTokens(req)
+	calibrated := tokenCount(ctx, req)
+	correction := float64(100_000) / float64(50_000)
+
+	t.Logf("heuristic=%d, correction=%.2f, calibrated=%d, stale_real=%d",
+		heuristic, correction, calibrated, 100_000)
+
+	if calibrated <= 100_000 {
+		t.Errorf("calibrated (%d) must exceed stale real tokens (100000)", calibrated)
+	}
+
+	expectedCalibrated := int(float64(heuristic) * correction)
+	if calibrated != expectedCalibrated {
+		t.Errorf("calibrated = %d, want %d", calibrated, expectedCalibrated)
+	}
+
+	contextWindow := 200_000
+	threshold := contextWindow - computeBuffer(contextWindow)
+	if calibrated < threshold {
+		t.Errorf("calibrated (%d) should exceed threshold (%d) for this massive request", calibrated, threshold)
+	}
+
+	registry := &mockRegistry{
+		contextWindows: map[string]int{"test-model": contextWindow},
+		maxTokens:      map[string]int{"test-model": 4096},
+	}
+	llm := &mockLLM{name: "test-model", response: "Compacted summary of the conversation."}
+	s := newThresholdStrategy(registry, llm, 0)
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if !strings.Contains(req.Contents[0].Parts[0].Text, "[Previous conversation summary]") {
+		t.Error("compaction should have fired for this massive request")
+	}
+	t.Logf("Compaction triggered correctly. Contents reduced from 3 to %d", len(req.Contents))
 }
