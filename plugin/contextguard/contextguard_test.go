@@ -20,7 +20,6 @@ import (
 	"iter"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -984,7 +983,7 @@ func TestSlidingWindowStrategy_RespectsWatermark(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: CrushRegistry (unit, no network)
+// Tests: CrushRegistry (catwalk embedded, no network)
 // ---------------------------------------------------------------------------
 
 func TestCrushRegistry_DefaultValues(t *testing.T) {
@@ -998,18 +997,43 @@ func TestCrushRegistry_DefaultValues(t *testing.T) {
 	}
 }
 
-func TestCrushRegistry_StartStop(t *testing.T) {
+func TestCrushRegistry_KnownModels(t *testing.T) {
 	r := NewCrushRegistry()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 
-	r.Start(ctx)
-	r.Stop()
+	knownModels := []string{
+		"claude-sonnet-4-6",
+		"claude-opus-4-6",
+		"gpt-4o",
+		"gpt-4o-mini",
+	}
+
+	for _, modelID := range knownModels {
+		t.Run(modelID, func(t *testing.T) {
+			if _, ok := r.models[modelID]; !ok {
+				t.Fatalf("model %s not found in registry", modelID)
+			}
+
+			ctxWin := r.ContextWindow(modelID)
+			if ctxWin <= 0 {
+				t.Errorf("ContextWindow(%s) = %d, expected > 0", modelID, ctxWin)
+			}
+
+			maxTok := r.DefaultMaxTokens(modelID)
+			if maxTok <= 0 {
+				t.Errorf("DefaultMaxTokens(%s) = %d, expected > 0", modelID, maxTok)
+			}
+		})
+	}
 }
 
-func TestCrushRegistry_StopWithoutStart(t *testing.T) {
+func TestCrushRegistry_LoadsMultipleProviders(t *testing.T) {
 	r := NewCrushRegistry()
-	r.Stop()
+	if len(r.models) == 0 {
+		t.Fatal("expected models to be loaded, got 0")
+	}
+	if len(r.models) < 50 {
+		t.Errorf("expected at least 50 models from catwalk, got %d", len(r.models))
+	}
 }
 
 // ---------------------------------------------------------------------------
