@@ -177,6 +177,39 @@ func loadLastHeuristic(ctx agent.CallbackContext) int {
 	return 0
 }
 
+// resetCalibration clears the real token count and last heuristic from
+// session state. Called after compaction so the next turn starts fresh
+// instead of applying a stale correction factor derived from a much
+// larger pre-compaction request.
+func resetCalibration(ctx agent.CallbackContext) {
+	keyReal := stateKeyPrefixRealTokens + ctx.AgentName()
+	keyHeuristic := stateKeyPrefixLastHeuristic + ctx.AgentName()
+	if err := ctx.State().Set(keyReal, 0); err != nil {
+		slog.Warn("ContextGuard: failed to reset real tokens", "error", err)
+	}
+	if err := ctx.State().Set(keyHeuristic, 0); err != nil {
+		slog.Warn("ContextGuard: failed to reset last heuristic", "error", err)
+	}
+}
+
+// truncateForSummarizer trims the conversation contents so that the
+// summarization prompt itself doesn't exceed the summarizer LLM's context
+// window. It keeps the most recent messages (freshest context) and drops
+// the oldest ones when the total exceeds 80% of contextWindow. The 80%
+// budget leaves room for the system prompt, previous summary, and output.
+func truncateForSummarizer(contents []*genai.Content, contextWindow int) []*genai.Content {
+	budget := int(float64(contextWindow) * 0.80)
+	total := estimateContentTokens(contents)
+	if total <= budget {
+		return contents
+	}
+
+	for len(contents) > 2 && estimateContentTokens(contents) > budget {
+		contents = contents[1:]
+	}
+	return contents
+}
+
 // tokenCount returns the best available token estimate for the current
 // request. It uses a calibrated heuristic to close the timing gap between
 // AfterModelCallback (where real tokens are recorded) and BeforeModelCallback
@@ -196,25 +229,48 @@ func tokenCount(ctx agent.CallbackContext, req *model.LLMRequest) int {
 	realTokens := loadRealTokens(ctx)
 
 	if realTokens <= 0 {
-		return int(float64(currentHeuristic) * defaultHeuristicCorrectionFactor)
+		result := int(float64(currentHeuristic) * defaultHeuristicCorrectionFactor)
+		slog.Debug("ContextGuard [tokenCount]: no calibration data, using default factor",
+			"agent", ctx.AgentName(),
+			"heuristic", currentHeuristic,
+			"factor", defaultHeuristicCorrectionFactor,
+			"result", result,
+		)
+		return result
 	}
 
 	lastHeuristic := loadLastHeuristic(ctx)
 	var calibrated int
+	var correction float64
 	if lastHeuristic > 0 {
-		correction := float64(realTokens) / float64(lastHeuristic)
+		correction = float64(realTokens) / float64(lastHeuristic)
 		if correction < 1.0 {
 			correction = 1.0
 		}
+		if correction > maxCorrectionFactor {
+			correction = maxCorrectionFactor
+		}
 		calibrated = int(float64(currentHeuristic) * correction)
 	} else {
-		calibrated = int(float64(currentHeuristic) * defaultHeuristicCorrectionFactor)
+		correction = defaultHeuristicCorrectionFactor
+		calibrated = int(float64(currentHeuristic) * correction)
 	}
 
+	result := calibrated
 	if realTokens > calibrated {
-		return realTokens
+		result = realTokens
 	}
-	return calibrated
+
+	slog.Debug("ContextGuard [tokenCount]: calibrated estimate",
+		"agent", ctx.AgentName(),
+		"heuristic", currentHeuristic,
+		"realTokens", realTokens,
+		"lastHeuristic", lastHeuristic,
+		"correction", fmt.Sprintf("%.2f", correction),
+		"calibrated", calibrated,
+		"result", result,
+	)
+	return result
 }
 
 // --- Todo state helpers ---

@@ -76,10 +76,16 @@ const (
 	maxCompactionAttempts = 3
 
 	// defaultHeuristicCorrectionFactor is applied to the len/4 heuristic
-	// when no real token data is available for calibration. The value 1.5
-	// assumes the heuristic underestimates by ~33%, which is conservative
-	// enough to trigger compaction early rather than risk overflow.
-	defaultHeuristicCorrectionFactor = 1.5
+	// when no real token data is available for calibration. The value 2.0
+	// accounts for the typical 2x underestimation of len/4 on structured
+	// content (JSON tool schemas, markdown, non-ASCII). This ensures
+	// compaction fires early enough even without provider token counts.
+	defaultHeuristicCorrectionFactor = 2.0
+
+	// maxCorrectionFactor caps the calibration ratio to prevent a single
+	// turn with unusual content (e.g. JSON-heavy tool schemas) from
+	// producing a disproportionate correction that persists across turns.
+	maxCorrectionFactor = 5.0
 )
 
 const defaultMaxTurns = 20

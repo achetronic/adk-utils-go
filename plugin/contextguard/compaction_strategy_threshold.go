@@ -15,7 +15,6 @@
 package contextguard
 
 import (
-	"fmt"
 	"log/slog"
 	"sync"
 
@@ -97,14 +96,23 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 	userContent := ctx.UserContent()
 	todos := loadTodos(ctx)
 
-	summary, err := summarize(ctx, s.llm, req.Contents, existingSummary, buffer, todos)
+	contentsForSummary := truncateForSummarizer(req.Contents, contextWindow)
+
+	summary, err := summarize(ctx, s.llm, contentsForSummary, existingSummary, buffer, todos)
 	if err != nil {
-		return fmt.Errorf("summarization failed: %w", err)
+		slog.Warn("ContextGuard [threshold]: summarization failed, using fallback",
+			"agent", ctx.AgentName(),
+			"session", ctx.SessionID(),
+			"error", err,
+		)
+		summary = buildFallbackSummary(contentsForSummary, existingSummary)
 	}
 
 	persistSummary(ctx, summary, totalTokens)
 	replaceSummary(req, summary, nil)
 	injectContinuation(req, userContent)
+
+	resetCalibration(ctx)
 
 	newTokens := estimateTokens(req)
 
