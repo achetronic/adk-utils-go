@@ -18,6 +18,7 @@ A Go library providing utilities for Google's Agent Development Kit (ADK). This 
 | `google.golang.org/genai` | Google GenAI types |
 | `github.com/redis/go-redis/v9` | Redis client for session storage |
 | `github.com/lib/pq` | PostgreSQL driver for memory storage |
+| `charm.land/catwalk` | Embedded model registry (564 models, 23 providers) |
 
 ---
 
@@ -85,14 +86,15 @@ adk-utils-go/
 │       └── toolset.go           # Memory toolset for agent tools
 ├── plugin/
 │   └── contextguard/
-│       ├── contextguard.go           # Public API: New(), Add(), PluginConfig(), AgentOption, strategy constants
-│       ├── contextguard_test.go      # 62 tests covering all functions
-│       ├── compaction_simulation_test.go # Realistic simulation: kube-agent, mixed-debug, pure-tool-storm
-│       ├── model_registry.go         # ModelRegistry interface (ContextWindow, DefaultMaxTokens)
-│       ├── model_registry_crush.go   # CrushRegistry: fetches from Crush provider.json, 6h refresh
-│       ├── compaction_utils.go       # Internal helpers: state, summarization, tokens, splitting
-│       ├── compaction_threshold.go   # Token-threshold strategy (Compact, iterative retry)
-│       └── compaction_sliding_window.go # Sliding-window strategy (Compact, iterative retry)
+│       ├── contextguard.go                        # Public API: New(), Add(), PluginConfig(), BeforeModel/AfterModel callbacks
+│       ├── contextguard_unit_test.go               # 93 unit tests covering all functions + timing gap proofs
+│       ├── compaction_strategy_multiturn_test.go   # 25 multi-turn session simulations (200k/8k, tools, ratios, loops)
+│       ├── compaction_strategy_singleshot_test.go  # Single-shot Compact() tests: kube-agent, mixed-debug, tool-storm, timing gap
+│       ├── model_registry.go                       # ModelRegistry interface (ContextWindow, DefaultMaxTokens)
+│       ├── model_registry_crush.go                 # CrushRegistry: catwalk embedded DB, 564 models, zero network
+│       ├── compaction_utils.go                     # Internal helpers: state, summarization, tokens, calibration, splitting, continuation, todos, truncation
+│       ├── compaction_strategy_threshold.go        # Token-threshold strategy (Crush-style full summary + hardening)
+│       └── compaction_strategy_sliding_window.go   # Sliding-window strategy (turn-count, with recent tail + retry)
 ├── examples/
 │   ├── openai-client/main.go
 │   ├── anthropic-client/main.go
@@ -181,7 +183,8 @@ The `OpenAICompatibleEmbedding` implementation works with any OpenAI-compatible 
 ### Unit Tests (No External Dependencies)
 
 - `embedding_test.go` - Uses `httptest` mock servers
-- `contextguard_test.go` - 48 unit tests with mock LLM, state, and registry (no network)
+- `contextguard_test.go` - 93 unit tests with mock LLM, state, and registry (no network)
+- `compaction_stress_test.go` - 25 multi-turn session simulations with mock LLM (no network)
 
 ### Integration Tests (Require External Services)
 
@@ -279,7 +282,7 @@ Both `memory/postgres` and `tools/memory` import this package; neither imports t
 
 ## ContextGuard Plugin
 
-The `plugin/contextguard` package provides an ADK plugin that prevents conversations from exceeding the LLM's context window.
+The `plugin/contextguard` package provides an ADK plugin that prevents conversations from exceeding the LLM's context window. Uses Crush-style full-summary compaction with calibrated real token counts.
 
 ### API
 
@@ -288,7 +291,7 @@ guard := contextguard.New(registry)  // ModelRegistry or CrushRegistry
 guard.Add("assistant", llm)           // threshold (auto-detect from registry)
 guard.Add("agent2", llm, contextguard.WithMaxTokens(500_000))  // threshold (manual)
 guard.Add("agent3", llm, contextguard.WithSlidingWindow(30))   // sliding window
-cfg := guard.PluginConfig()           // runner.PluginConfig with single BeforeModelCallback
+cfg := guard.PluginConfig()           // runner.PluginConfig with BeforeModelCallback + AfterModelCallback
 ```
 
 ### Key Design
@@ -296,26 +299,69 @@ cfg := guard.PluginConfig()           // runner.PluginConfig with single BeforeM
 - **Builder pattern**: `New()` + `Add()` + `PluginConfig()` — single-agent and multi-agent look identical
 - **Functional options**: `AgentOption` keeps common case zero-config, overrides via `WithMaxTokens`/`WithSlidingWindow`
 - **Per-agent strategies**: each agent gets its own strategy and summarizes with its own LLM
+- **Two callbacks**: `BeforeModelCallback` checks tokens and compacts; `AfterModelCallback` persists real token counts from the provider
+- **Calibrated heuristic**: bridges the timing gap between callbacks using a correction factor derived from real vs heuristic tokens of the previous call. Correction factor capped at 5.0x to prevent anomalous turns from distorting future estimates
+- **Full summary**: threshold strategy always summarizes the entire conversation (no recent tail). Post-compaction result is `[summary] + [continuation]` — always small and predictable
+- **Robust failure handling**: conversation truncated to 80% of context window before summarization (prevents summarizer overflow). If LLM summarization fails, falls back to mechanical summary instead of passing through the bloated request
 - **ADK limitation**: `launcher.Config.PluginConfig` is a single field — the plugin internally dispatches by `ctx.AgentName()`
 - **State keys**: all keys suffixed with `{agentName}` to prevent cross-agent contamination in shared sessions
 
+### State Keys
+
+| Key | Set by | Read by | Purpose |
+|---|---|---|---|
+| `__context_guard_summary_{agent}` | `BeforeModelCallback` | `BeforeModelCallback` | Running conversation summary |
+| `__context_guard_summarized_at_{agent}` | `BeforeModelCallback` | (diagnostic) | Token count at last compaction |
+| `__context_guard_real_tokens_{agent}` | `AfterModelCallback` | `BeforeModelCallback` | Real `PromptTokenCount` from provider |
+| `__context_guard_last_heuristic_{agent}` | `BeforeModelCallback` | `BeforeModelCallback` | Heuristic estimate for calibration |
+| `__context_guard_contents_at_compaction_{agent}` | Sliding window | Sliding window | Watermark for turn counting |
+
 ### File Naming Convention
 
-- `contextguard.go` — public API
+- `contextguard.go` — public API, `BeforeModelCallback`, `AfterModelCallback`
+- `contextguard_unit_test.go` — 93 unit tests (mocks, no ADK flow)
 - `model_registry*.go` — ModelRegistry interface and implementations
-- `compaction_*.go` — compaction strategies and shared helpers
+- `compaction_strategy_threshold.go` — token-threshold strategy (full summary, calibrated tokens, hardened)
+- `compaction_strategy_sliding_window.go` — sliding-window strategy (turn-count based, with recent tail)
+- `compaction_utils.go` — shared helpers: state persistence, summarization, token estimation, continuation injection, todo loading, conversation truncation
+- `compaction_strategy_multiturn_test.go` — 25 multi-turn session simulations with `simulateSession()` framework (threshold only)
+- `compaction_strategy_singleshot_test.go` — single-shot `Compact()` tests for both strategies, timing gap proofs
 
 ### CrushRegistry
 
-Built-in `ModelRegistry` that fetches model metadata from `https://raw.githubusercontent.com/charmbracelet/crush/main/internal/agent/hyper/provider.json`. Background refresh every 6h. Defaults to 128k context / 4096 max tokens for unknown models.
+Built-in `ModelRegistry` using `charm.land/catwalk/pkg/embedded` — 564 models from 23 providers compiled into the binary. Zero network calls, no goroutines, no `Start()`/`Stop()` lifecycle. Defaults to 128k context / 4096 max tokens for unknown models.
+
+### Stress Tests
+
+25 multi-turn session simulations in `compaction_stress_test.go`. Run with:
+
+```bash
+go test -v ./plugin/contextguard/... -count=1 -run "TestStress"
+```
+
+Cover 200k and 8k context windows, token ratios 1.5x-4.0x, with/without UsageMetadata, tool bursts up to 750k chars, long-running sessions (40-100 turns), large system prompts, compaction loop detection. See [TODOS.md](./TODOS.md) for the complete test matrix.
 
 ### Strategies
 
-| Strategy | Trigger | Config |
-|---|---|---|
-| `threshold` | estimated tokens > (contextWindow - buffer) | `WithMaxTokens(n)` or auto from registry |
-| `sliding_window` | turns since last compaction > maxTurns | `WithSlidingWindow(n)` |
+| Strategy | Trigger | Compaction mode | Config |
+|---|---|---|---|
+| `threshold` | calibrated tokens > (contextWindow - buffer) | Full summary (entire conversation) | `WithMaxTokens(n)` or auto from registry |
+| `sliding_window` | turns since last compaction > maxTurns | Split: summarize old, keep recent tail | `WithSlidingWindow(n)` |
 
 Buffer: fixed 20k for windows >200k, 20% for smaller ones.
+
+### Compaction Flow (threshold)
+
+See [INVESTIGATION_RESULTS.md](./INVESTIGATION_RESULTS.md) for the full architecture diagram and timing analysis.
+
+```
+BeforeModelCallback:
+  tokenCount() → calibrated estimate (correction capped at 5.0x)
+  if < threshold → pass through
+  if ≥ threshold → truncate for summarizer → summarize (fallback on error) → [summary] + [continuation]
+
+AfterModelCallback:
+  persist PromptTokenCount for next step's calibration
+```
 
 

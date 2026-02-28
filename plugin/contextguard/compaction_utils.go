@@ -118,6 +118,207 @@ func persistContentsAtCompaction(ctx agent.CallbackContext, count int) {
 	}
 }
 
+// persistRealTokens writes the real token count from the provider to session
+// state. Called by the AfterModelCallback.
+func persistRealTokens(ctx agent.CallbackContext, tokens int) {
+	key := stateKeyPrefixRealTokens + ctx.AgentName()
+	if err := ctx.State().Set(key, tokens); err != nil {
+		slog.Warn("ContextGuard: failed to persist real token count", "error", err)
+	}
+}
+
+// loadRealTokens reads the real token count from session state. Returns 0 if
+// no count has been recorded yet (first turn or provider doesn't report usage).
+func loadRealTokens(ctx agent.CallbackContext) int {
+	key := stateKeyPrefixRealTokens + ctx.AgentName()
+	val, err := ctx.State().Get(key)
+	if err != nil {
+		return 0
+	}
+	if val == nil {
+		return 0
+	}
+	switch v := val.(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
+// persistLastHeuristic writes the heuristic token estimate of the request
+// that was sent to the LLM. Called by beforeModel AFTER compaction so it
+// reflects the final request. Used to compute a calibration factor.
+func persistLastHeuristic(ctx agent.CallbackContext, tokens int) {
+	key := stateKeyPrefixLastHeuristic + ctx.AgentName()
+	if err := ctx.State().Set(key, tokens); err != nil {
+		slog.Warn("ContextGuard: failed to persist last heuristic", "error", err)
+	}
+}
+
+// loadLastHeuristic reads the heuristic estimate from the previous LLM call.
+// Returns 0 if not yet recorded.
+func loadLastHeuristic(ctx agent.CallbackContext) int {
+	key := stateKeyPrefixLastHeuristic + ctx.AgentName()
+	val, err := ctx.State().Get(key)
+	if err != nil {
+		return 0
+	}
+	if val == nil {
+		return 0
+	}
+	switch v := val.(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
+// resetCalibration clears the real token count and last heuristic from
+// session state. Called after compaction so the next turn starts fresh
+// instead of applying a stale correction factor derived from a much
+// larger pre-compaction request.
+func resetCalibration(ctx agent.CallbackContext) {
+	keyReal := stateKeyPrefixRealTokens + ctx.AgentName()
+	keyHeuristic := stateKeyPrefixLastHeuristic + ctx.AgentName()
+	if err := ctx.State().Set(keyReal, 0); err != nil {
+		slog.Warn("ContextGuard: failed to reset real tokens", "error", err)
+	}
+	if err := ctx.State().Set(keyHeuristic, 0); err != nil {
+		slog.Warn("ContextGuard: failed to reset last heuristic", "error", err)
+	}
+}
+
+// truncateForSummarizer trims the conversation contents so that the
+// summarization prompt itself doesn't exceed the summarizer LLM's context
+// window. It keeps the most recent messages (freshest context) and drops
+// the oldest ones when the total exceeds 80% of contextWindow. The 80%
+// budget leaves room for the system prompt, previous summary, and output.
+func truncateForSummarizer(contents []*genai.Content, contextWindow int) []*genai.Content {
+	budget := int(float64(contextWindow) * 0.80)
+	total := estimateContentTokens(contents)
+	if total <= budget {
+		return contents
+	}
+
+	for len(contents) > 2 && estimateContentTokens(contents) > budget {
+		contents = contents[1:]
+	}
+	return contents
+}
+
+// tokenCount returns the best available token estimate for the current
+// request. It uses a calibrated heuristic to close the timing gap between
+// AfterModelCallback (where real tokens are recorded) and BeforeModelCallback
+// (where the check runs on a potentially larger request).
+//
+// Algorithm:
+//  1. Compute the heuristic on the current request (reflects tool results
+//     added since the last LLM call).
+//  2. If we have both real tokens and a heuristic from the previous call,
+//     derive a correction factor and apply it to the current heuristic.
+//  3. Return max(realTokens, calibratedHeuristic) so neither stale real
+//     tokens nor an inaccurate heuristic can cause an undercount.
+//  4. If no real tokens are available, fall back to the raw heuristic
+//     scaled by a conservative default factor.
+func tokenCount(ctx agent.CallbackContext, req *model.LLMRequest) int {
+	currentHeuristic := estimateTokens(req)
+	realTokens := loadRealTokens(ctx)
+
+	if realTokens <= 0 {
+		result := int(float64(currentHeuristic) * defaultHeuristicCorrectionFactor)
+		slog.Debug("ContextGuard [tokenCount]: no calibration data, using default factor",
+			"agent", ctx.AgentName(),
+			"heuristic", currentHeuristic,
+			"factor", defaultHeuristicCorrectionFactor,
+			"result", result,
+		)
+		return result
+	}
+
+	lastHeuristic := loadLastHeuristic(ctx)
+	var calibrated int
+	var correction float64
+	if lastHeuristic > 0 {
+		correction = float64(realTokens) / float64(lastHeuristic)
+		if correction < 1.0 {
+			correction = 1.0
+		}
+		if correction > maxCorrectionFactor {
+			correction = maxCorrectionFactor
+		}
+		calibrated = int(float64(currentHeuristic) * correction)
+	} else {
+		correction = defaultHeuristicCorrectionFactor
+		calibrated = int(float64(currentHeuristic) * correction)
+	}
+
+	result := calibrated
+	if realTokens > calibrated {
+		result = realTokens
+	}
+
+	slog.Debug("ContextGuard [tokenCount]: calibrated estimate",
+		"agent", ctx.AgentName(),
+		"heuristic", currentHeuristic,
+		"realTokens", realTokens,
+		"lastHeuristic", lastHeuristic,
+		"correction", fmt.Sprintf("%.2f", correction),
+		"calibrated", calibrated,
+		"result", result,
+	)
+	return result
+}
+
+// --- Todo state helpers ---
+
+// TodoItem represents a single task tracked in session state.
+type TodoItem struct {
+	Content    string `json:"content"`
+	Status     string `json:"status"`
+	ActiveForm string `json:"active_form,omitempty"`
+}
+
+// loadTodos reads the todo list from session state. Returns nil if no todos
+// are stored. Supports both []TodoItem and []any (from JSON deserialization).
+func loadTodos(ctx agent.CallbackContext) []TodoItem {
+	val, err := ctx.State().Get("todos")
+	if err != nil || val == nil {
+		return nil
+	}
+
+	switch v := val.(type) {
+	case []TodoItem:
+		return v
+	case []any:
+		var items []TodoItem
+		for _, raw := range v {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			item := TodoItem{}
+			if c, ok := m["content"].(string); ok {
+				item.Content = c
+			}
+			if s, ok := m["status"].(string); ok {
+				item.Status = s
+			}
+			if a, ok := m["active_form"].(string); ok {
+				item.ActiveForm = a
+			}
+			if item.Content != "" {
+				items = append(items, item)
+			}
+		}
+		return items
+	}
+	return nil
+}
+
 // --- Summarization ---
 
 // summarize calls the given LLM to produce a concise summary of the provided
@@ -125,12 +326,15 @@ func persistContentsAtCompaction(ctx agent.CallbackContext, count int) {
 // summary may use up to 50% of the buffer, converted to words at a 0.75
 // words-per-token ratio. If the LLM returns an empty response, a mechanical
 // fallback summary (truncated excerpts) is used instead.
-func summarize(ctx context.Context, llm model.LLM, contents []*genai.Content, previousSummary string, bufferTokens int) (string, error) {
+//
+// When todos is non-empty, the todo list is appended to the summarization
+// prompt so it can be preserved across compaction boundaries.
+func summarize(ctx context.Context, llm model.LLM, contents []*genai.Content, previousSummary string, bufferTokens int, todos []TodoItem) (string, error) {
 	maxOutputTokens := int32(float64(bufferTokens) * 0.50)
 	maxWords := int(float64(maxOutputTokens) * 0.75)
 
 	systemPrompt := summarizeSystemPrompt + fmt.Sprintf("\n\nKeep the summary under %d words.", maxWords)
-	userPrompt := buildSummarizePrompt(contents, previousSummary)
+	userPrompt := buildSummarizePrompt(contents, previousSummary, todos)
 
 	req := &model.LLMRequest{
 		Model: llm.Name(),
@@ -171,8 +375,9 @@ func summarize(ctx context.Context, llm model.LLM, contents []*genai.Content, pr
 
 // buildSummarizePrompt assembles the user-facing prompt sent to the LLM for
 // summarization: a request to summarize, any previous summary for continuity,
-// and a transcript of the conversation contents.
-func buildSummarizePrompt(contents []*genai.Content, previousSummary string) string {
+// a transcript of the conversation contents, and optionally the current todo
+// list for preservation.
+func buildSummarizePrompt(contents []*genai.Content, previousSummary string, todos []TodoItem) string {
 	var sb strings.Builder
 	sb.WriteString("Provide a detailed summary of the following conversation.")
 	sb.WriteString("\n\n")
@@ -219,6 +424,16 @@ func buildSummarizePrompt(contents []*genai.Content, previousSummary string) str
 		}
 	}
 	sb.WriteString("[End of conversation]\n")
+
+	if len(todos) > 0 {
+		sb.WriteString("\n[Current todo list]\n")
+		for _, t := range todos {
+			fmt.Fprintf(&sb, "- [%s] %s\n", t.Status, t.Content)
+		}
+		sb.WriteString("[End todo list]\n\n")
+		sb.WriteString("Include these tasks and their statuses in your summary under a dedicated \"## Todo List\" section. ")
+		sb.WriteString("Instruct the resuming assistant to restore them using the `todos` tool to continue tracking progress.\n")
+	}
 
 	return sb.String()
 }
@@ -450,10 +665,13 @@ func contentHasFunctionCall(c *genai.Content) bool {
 	return false
 }
 
-// injectSummary prepends a summary content block to the request. If a
-// summary block already exists as the first message, it is left untouched
-// to avoid duplicates.
-func injectSummary(req *model.LLMRequest, summary string) {
+// injectSummary replaces events that were already summarized with the
+// summary content block. contentsAtCompaction is the number of Content
+// entries in req.Contents when the summary was produced. Events after
+// that watermark are kept as-is (they are new since the last compaction).
+// If contentsAtCompaction is 0 or exceeds the current length, the summary
+// is simply prepended (first compaction or safety fallback).
+func injectSummary(req *model.LLMRequest, summary string, contentsAtCompaction int) {
 	summaryText := fmt.Sprintf("[Previous conversation summary]\n%s\n[End of summary — conversation continues below]", summary)
 
 	if len(req.Contents) > 0 && req.Contents[0] != nil &&
@@ -471,7 +689,13 @@ func injectSummary(req *model.LLMRequest, summary string) {
 			{Text: summaryText},
 		},
 	}
-	req.Contents = append([]*genai.Content{summaryContent}, req.Contents...)
+
+	if contentsAtCompaction > 0 && contentsAtCompaction <= len(req.Contents) {
+		newContents := req.Contents[contentsAtCompaction:]
+		req.Contents = append([]*genai.Content{summaryContent}, newContents...)
+	} else {
+		req.Contents = append([]*genai.Content{summaryContent}, req.Contents...)
+	}
 }
 
 // replaceSummary rewrites req.Contents to [summary + recentContents],
@@ -484,4 +708,36 @@ func replaceSummary(req *model.LLMRequest, summary string, recentContents []*gen
 		},
 	}
 	req.Contents = append([]*genai.Content{summaryContent}, recentContents...)
+}
+
+// injectContinuation appends a continuation instruction to req.Contents so
+// the agent knows to resume work without re-asking the user. If userContent
+// is available, the original user request is included for reference.
+func injectContinuation(req *model.LLMRequest, userContent *genai.Content) {
+	var text string
+	if userContent != nil {
+		for _, part := range userContent.Parts {
+			if part != nil && part.Text != "" {
+				text = part.Text
+				break
+			}
+		}
+	}
+
+	var msg string
+	if text != "" {
+		msg = fmt.Sprintf(
+			"[System: The conversation was compacted because it exceeded the context window. "+
+				"The summary above contains all prior context. The user's current request is: `%s`. "+
+				"Continue working on this request without asking the user to repeat anything.]", text)
+	} else {
+		msg = "[System: The conversation was compacted because it exceeded the context window. " +
+			"The summary above contains all prior context. " +
+			"Continue working without asking the user to repeat anything.]"
+	}
+
+	req.Contents = append(req.Contents, &genai.Content{
+		Role:  "user",
+		Parts: []*genai.Part{{Text: msg}},
+	})
 }

@@ -62,11 +62,9 @@ func main() {
 
 	modelName := getEnvOrDefault("MODEL_NAME", "claude-sonnet-4-5-20250929")
 
-	// 1. Start the built-in Crush registry — fetches model metadata
-	//    (context windows, costs, max tokens) and refreshes every 6 hours.
+	// 1. Create the model registry — uses catwalk's embedded database,
+	//    no network calls needed.
 	registry := contextguard.NewCrushRegistry()
-	registry.Start(ctx)
-	defer registry.Stop()
 
 	fmt.Printf("Context window for %s: %d tokens\n", modelName, registry.ContextWindow(modelName))
 

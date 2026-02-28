@@ -20,7 +20,6 @@ import (
 	"iter"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -402,7 +401,7 @@ func TestInjectSummary_AddsSummary(t *testing.T) {
 			textContent("user", "hello"),
 		},
 	}
-	injectSummary(req, "previous conversation about Go testing")
+	injectSummary(req, "previous conversation about Go testing", 0)
 
 	if len(req.Contents) != 2 {
 		t.Fatalf("expected 2 contents, got %d", len(req.Contents))
@@ -422,7 +421,7 @@ func TestInjectSummary_NoDuplicate(t *testing.T) {
 			textContent("user", "hello"),
 		},
 	}
-	injectSummary(req, "new summary")
+	injectSummary(req, "new summary", 0)
 
 	if len(req.Contents) != 2 {
 		t.Fatalf("expected no duplicate, got %d contents", len(req.Contents))
@@ -465,7 +464,7 @@ func TestBuildSummarizePrompt_WithoutPreviousSummary(t *testing.T) {
 		textContent("user", "What is Go?"),
 		textContent("model", "Go is a programming language."),
 	}
-	prompt := buildSummarizePrompt(contents, "")
+	prompt := buildSummarizePrompt(contents, "", nil)
 
 	if !strings.Contains(prompt, "Provide a detailed summary") {
 		t.Error("missing summary instruction")
@@ -485,7 +484,7 @@ func TestBuildSummarizePrompt_WithPreviousSummary(t *testing.T) {
 	contents := []*genai.Content{
 		textContent("user", "Tell me more"),
 	}
-	prompt := buildSummarizePrompt(contents, "Earlier we discussed Go.")
+	prompt := buildSummarizePrompt(contents, "Earlier we discussed Go.", nil)
 
 	if !strings.Contains(prompt, "Earlier we discussed Go.") {
 		t.Error("missing previous summary")
@@ -500,7 +499,7 @@ func TestBuildSummarizePrompt_WithToolCalls(t *testing.T) {
 		toolCallContent("search"),
 		toolResultContent("search"),
 	}
-	prompt := buildSummarizePrompt(contents, "")
+	prompt := buildSummarizePrompt(contents, "", nil)
 
 	if !strings.Contains(prompt, "[called tool: search]") {
 		t.Error("missing tool call in transcript")
@@ -512,7 +511,7 @@ func TestBuildSummarizePrompt_WithToolCalls(t *testing.T) {
 
 func TestBuildSummarizePrompt_NilContents(t *testing.T) {
 	contents := []*genai.Content{nil, textContent("user", "hello"), nil}
-	prompt := buildSummarizePrompt(contents, "")
+	prompt := buildSummarizePrompt(contents, "", nil)
 	if !strings.Contains(prompt, "hello") {
 		t.Error("should include non-nil content")
 	}
@@ -830,6 +829,9 @@ func TestThresholdStrategy_ExceedsThreshold(t *testing.T) {
 	if len(req.Contents) >= originalLen {
 		t.Error("should have compacted the conversation")
 	}
+	if len(req.Contents) != 2 {
+		t.Errorf("expected 2 contents (summary + continuation), got %d", len(req.Contents))
+	}
 	if !strings.Contains(req.Contents[0].Parts[0].Text, "Summarized conversation") {
 		t.Error("first content should be the summary")
 	}
@@ -981,7 +983,7 @@ func TestSlidingWindowStrategy_RespectsWatermark(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: CrushRegistry (unit, no network)
+// Tests: CrushRegistry (catwalk embedded, no network)
 // ---------------------------------------------------------------------------
 
 func TestCrushRegistry_DefaultValues(t *testing.T) {
@@ -995,18 +997,43 @@ func TestCrushRegistry_DefaultValues(t *testing.T) {
 	}
 }
 
-func TestCrushRegistry_StartStop(t *testing.T) {
+func TestCrushRegistry_KnownModels(t *testing.T) {
 	r := NewCrushRegistry()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 
-	r.Start(ctx)
-	r.Stop()
+	knownModels := []string{
+		"claude-sonnet-4-6",
+		"claude-opus-4-6",
+		"gpt-4o",
+		"gpt-4o-mini",
+	}
+
+	for _, modelID := range knownModels {
+		t.Run(modelID, func(t *testing.T) {
+			if _, ok := r.models[modelID]; !ok {
+				t.Fatalf("model %s not found in registry", modelID)
+			}
+
+			ctxWin := r.ContextWindow(modelID)
+			if ctxWin <= 0 {
+				t.Errorf("ContextWindow(%s) = %d, expected > 0", modelID, ctxWin)
+			}
+
+			maxTok := r.DefaultMaxTokens(modelID)
+			if maxTok <= 0 {
+				t.Errorf("DefaultMaxTokens(%s) = %d, expected > 0", modelID, maxTok)
+			}
+		})
+	}
 }
 
-func TestCrushRegistry_StopWithoutStart(t *testing.T) {
+func TestCrushRegistry_LoadsMultipleProviders(t *testing.T) {
 	r := NewCrushRegistry()
-	r.Stop()
+	if len(r.models) == 0 {
+		t.Fatal("expected models to be loaded, got 0")
+	}
+	if len(r.models) < 50 {
+		t.Errorf("expected at least 50 models from catwalk, got %d", len(r.models))
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1305,5 +1332,507 @@ func TestSlidingWindowStrategy_AllToolCalls_StillCompacts(t *testing.T) {
 	watermark := loadContentsAtCompaction(ctx)
 	if watermark <= 0 {
 		t.Error("watermark should have been written after compaction")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Proposal 5.1 — Real token counts via AfterModelCallback
+// ---------------------------------------------------------------------------
+
+func TestPersistAndLoadRealTokens(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+
+	if got := loadRealTokens(ctx); got != 0 {
+		t.Errorf("loadRealTokens on empty state = %d, want 0", got)
+	}
+
+	persistRealTokens(ctx, 150_000)
+
+	if got := loadRealTokens(ctx); got != 150_000 {
+		t.Errorf("loadRealTokens = %d, want 150000", got)
+	}
+}
+
+func TestLoadRealTokens_Float64Conversion(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+	ctx.state.Set(stateKeyPrefixRealTokens+"agent1", float64(42_000))
+
+	if got := loadRealTokens(ctx); got != 42_000 {
+		t.Errorf("loadRealTokens(float64) = %d, want 42000", got)
+	}
+}
+
+func TestTokenCount_PrefersRealTokens(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", strings.Repeat("a", 400)),
+		},
+	}
+
+	heuristic := estimateTokens(req)
+	if heuristic != 100 {
+		t.Errorf("raw heuristic = %d, want 100", heuristic)
+	}
+
+	got := tokenCount(ctx, req)
+	wantDefault := int(float64(100) * defaultHeuristicCorrectionFactor)
+	if got != wantDefault {
+		t.Errorf("tokenCount without real = %d, want %d (heuristic * correction)", got, wantDefault)
+	}
+
+	persistRealTokens(ctx, 200_000)
+
+	real := tokenCount(ctx, req)
+	if real != 200_000 {
+		t.Errorf("tokenCount with real (no lastHeuristic) = %d, want 200000", real)
+	}
+}
+
+func TestTokenCount_CalibratedHeuristic(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+
+	persistRealTokens(ctx, 1000)
+	persistLastHeuristic(ctx, 500)
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", strings.Repeat("a", 3000)),
+		},
+	}
+	currentHeuristic := estimateTokens(req)
+	if currentHeuristic != 750 {
+		t.Fatalf("raw heuristic = %d, want 750", currentHeuristic)
+	}
+
+	got := tokenCount(ctx, req)
+	wantCalibrated := int(float64(750) * (float64(1000) / float64(500)))
+	if got != wantCalibrated {
+		t.Errorf("tokenCount calibrated = %d, want %d (750 * 2.0)", got, wantCalibrated)
+	}
+}
+
+func TestTokenCount_CorrectionFloorAtOne(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+
+	persistRealTokens(ctx, 300)
+	persistLastHeuristic(ctx, 600)
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", strings.Repeat("a", 2000)),
+		},
+	}
+	currentHeuristic := estimateTokens(req)
+
+	got := tokenCount(ctx, req)
+	if got != currentHeuristic {
+		t.Errorf("tokenCount with correction<1 = %d, want %d (correction clamped to 1.0)", got, currentHeuristic)
+	}
+}
+
+func TestTokenCount_RealTokensWinWhenLarger(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+
+	persistRealTokens(ctx, 100_000)
+	persistLastHeuristic(ctx, 50_000)
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", strings.Repeat("a", 400)),
+		},
+	}
+
+	got := tokenCount(ctx, req)
+	if got != 100_000 {
+		t.Errorf("tokenCount = %d, want 100000 (realTokens should win over small calibrated)", got)
+	}
+}
+
+func TestPersistAndLoadLastHeuristic(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+
+	if got := loadLastHeuristic(ctx); got != 0 {
+		t.Errorf("loadLastHeuristic empty = %d, want 0", got)
+	}
+
+	persistLastHeuristic(ctx, 42_000)
+
+	if got := loadLastHeuristic(ctx); got != 42_000 {
+		t.Errorf("loadLastHeuristic = %d, want 42000", got)
+	}
+}
+
+func TestAfterModel_PersistsTokenCount(t *testing.T) {
+	guard := New(newMockRegistry())
+	llm := &mockLLM{name: "gpt-4o"}
+	guard.Add("agent1", llm)
+
+	g := &contextGuard{strategies: guard.strategies}
+	ctx := newMockCallbackContext("agent1")
+
+	resp := &model.LLMResponse{
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     120_000,
+			CandidatesTokenCount: 5_000,
+		},
+	}
+
+	result, err := g.afterModel(ctx, resp, nil)
+	if result != nil || err != nil {
+		t.Errorf("afterModel should return (nil, nil), got (%v, %v)", result, err)
+	}
+
+	got := loadRealTokens(ctx)
+	if got != 120_000 {
+		t.Errorf("real tokens = %d, want 120000 (only PromptTokenCount)", got)
+	}
+}
+
+func TestAfterModel_NilUsageMetadata(t *testing.T) {
+	guard := New(newMockRegistry())
+	llm := &mockLLM{name: "gpt-4o"}
+	guard.Add("agent1", llm)
+
+	g := &contextGuard{strategies: guard.strategies}
+	ctx := newMockCallbackContext("agent1")
+
+	result, err := g.afterModel(ctx, &model.LLMResponse{}, nil)
+	if result != nil || err != nil {
+		t.Errorf("afterModel with nil usage should return (nil, nil)")
+	}
+
+	if got := loadRealTokens(ctx); got != 0 {
+		t.Errorf("should not persist when UsageMetadata is nil, got %d", got)
+	}
+}
+
+func TestAfterModel_SkipsPartials(t *testing.T) {
+	guard := New(newMockRegistry())
+	llm := &mockLLM{name: "gpt-4o"}
+	guard.Add("agent1", llm)
+
+	g := &contextGuard{strategies: guard.strategies}
+	ctx := newMockCallbackContext("agent1")
+
+	partial := &model.LLMResponse{
+		Partial: true,
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount: 100_000,
+		},
+	}
+
+	result, err := g.afterModel(ctx, partial, nil)
+	if result != nil || err != nil {
+		t.Errorf("afterModel with partial should return (nil, nil)")
+	}
+
+	if got := loadRealTokens(ctx); got != 0 {
+		t.Errorf("should not persist for partial responses, got %d", got)
+	}
+}
+
+func TestAfterModel_UnknownAgent(t *testing.T) {
+	g := &contextGuard{strategies: map[string]Strategy{}}
+	ctx := newMockCallbackContext("unknown")
+
+	resp := &model.LLMResponse{
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     100_000,
+			CandidatesTokenCount: 1_000,
+		},
+	}
+
+	result, err := g.afterModel(ctx, resp, nil)
+	if result != nil || err != nil {
+		t.Errorf("afterModel for unknown agent should return (nil, nil)")
+	}
+
+	if got := loadRealTokens(ctx); got != 0 {
+		t.Errorf("should not persist for unknown agent, got %d", got)
+	}
+}
+
+func TestThresholdStrategy_UsesRealTokens(t *testing.T) {
+	registry := newMockRegistry()
+	llm := &mockLLM{name: "gpt-4o", response: "compacted summary"}
+	s := newThresholdStrategy(registry, llm, 0)
+	ctx := newMockCallbackContext("agent1")
+
+	req := &model.LLMRequest{
+		Model:    "gpt-4o",
+		Contents: []*genai.Content{textContent("user", "short message")},
+	}
+
+	persistRealTokens(ctx, 110_000)
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if !strings.Contains(req.Contents[0].Parts[0].Text, "[Previous conversation summary]") {
+		t.Error("should have compacted: real tokens (110k) exceed threshold (128k - 25.6k = 102.4k)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Full summary — threshold always summarizes everything (no recent tail)
+// ---------------------------------------------------------------------------
+
+func TestThresholdStrategy_NoRecentTail(t *testing.T) {
+	registry := &mockRegistry{
+		contextWindows: map[string]int{"small-model": 1_000},
+		maxTokens:      map[string]int{"small-model": 512},
+	}
+	llm := &mockLLM{name: "small-model", response: "Full summary of everything"}
+	s := newThresholdStrategy(registry, llm, 0)
+	ctx := newMockCallbackContext("agent1")
+
+	req := &model.LLMRequest{
+		Model:    "small-model",
+		Contents: makeLargeConversation(2_000),
+	}
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if !strings.Contains(req.Contents[0].Parts[0].Text, "Full summary of everything") {
+		t.Error("first content should be the summary")
+	}
+
+	// Always full summary: [summary] + [continuation] = 2 messages
+	if len(req.Contents) != 2 {
+		t.Errorf("expected 2 contents (summary + continuation), got %d", len(req.Contents))
+	}
+
+	last := req.Contents[len(req.Contents)-1]
+	if !strings.Contains(last.Parts[0].Text, "conversation was compacted") {
+		t.Error("last content should be the continuation instruction")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Proposal 5.3 — Continuation context injection
+// ---------------------------------------------------------------------------
+
+func TestInjectContinuation_WithUserContent(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", "summary here"),
+		},
+	}
+	userContent := textContent("user", "Fix the auth middleware bug")
+
+	injectContinuation(req, userContent)
+
+	if len(req.Contents) != 2 {
+		t.Fatalf("expected 2 contents, got %d", len(req.Contents))
+	}
+
+	last := req.Contents[1]
+	if last.Role != "user" {
+		t.Errorf("continuation role = %q, want 'user'", last.Role)
+	}
+	if !strings.Contains(last.Parts[0].Text, "Fix the auth middleware bug") {
+		t.Error("continuation should contain original user request")
+	}
+	if !strings.Contains(last.Parts[0].Text, "conversation was compacted") {
+		t.Error("continuation should explain compaction")
+	}
+}
+
+func TestInjectContinuation_NilUserContent(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			textContent("user", "summary here"),
+		},
+	}
+
+	injectContinuation(req, nil)
+
+	if len(req.Contents) != 2 {
+		t.Fatalf("expected 2 contents, got %d", len(req.Contents))
+	}
+
+	last := req.Contents[1]
+	if !strings.Contains(last.Parts[0].Text, "Continue working") {
+		t.Error("continuation should still be injected without user content")
+	}
+}
+
+func TestThresholdStrategy_InjectsContinuation(t *testing.T) {
+	registry := &mockRegistry{
+		contextWindows: map[string]int{"small-model": 1_000},
+		maxTokens:      map[string]int{"small-model": 512},
+	}
+	llm := &mockLLM{name: "small-model", response: "summary"}
+	s := newThresholdStrategy(registry, llm, 0)
+
+	ctx := &mockCallbackContext{
+		Context:   context.Background(),
+		agentName: "agent1",
+		sessionID: "test-session",
+		state:     newMockState(),
+	}
+
+	req := &model.LLMRequest{
+		Model:    "small-model",
+		Contents: makeLargeConversation(2_000),
+	}
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	last := req.Contents[len(req.Contents)-1]
+	if !strings.Contains(last.Parts[0].Text, "conversation was compacted") {
+		t.Error("last content should be the continuation instruction after compaction")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Proposal 5.4 — Todo preservation in summary prompt
+// ---------------------------------------------------------------------------
+
+func TestLoadTodos_Empty(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+	todos := loadTodos(ctx)
+	if todos != nil {
+		t.Errorf("loadTodos on empty state should return nil, got %v", todos)
+	}
+}
+
+func TestLoadTodos_TypedSlice(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+	items := []TodoItem{
+		{Content: "Fix bug", Status: "completed"},
+		{Content: "Write tests", Status: "in_progress", ActiveForm: "Writing tests"},
+	}
+	ctx.state.Set("todos", items)
+
+	got := loadTodos(ctx)
+	if len(got) != 2 {
+		t.Fatalf("loadTodos = %d items, want 2", len(got))
+	}
+	if got[0].Content != "Fix bug" || got[0].Status != "completed" {
+		t.Errorf("todo[0] = %+v", got[0])
+	}
+	if got[1].Content != "Write tests" || got[1].ActiveForm != "Writing tests" {
+		t.Errorf("todo[1] = %+v", got[1])
+	}
+}
+
+func TestLoadTodos_MapSlice(t *testing.T) {
+	ctx := newMockCallbackContext("agent1")
+	raw := []any{
+		map[string]any{"content": "Deploy", "status": "pending", "active_form": "Deploying"},
+		map[string]any{"content": "Monitor", "status": "completed"},
+	}
+	ctx.state.Set("todos", raw)
+
+	got := loadTodos(ctx)
+	if len(got) != 2 {
+		t.Fatalf("loadTodos from []any = %d items, want 2", len(got))
+	}
+	if got[0].Content != "Deploy" || got[0].Status != "pending" || got[0].ActiveForm != "Deploying" {
+		t.Errorf("todo[0] = %+v", got[0])
+	}
+	if got[1].Content != "Monitor" || got[1].Status != "completed" {
+		t.Errorf("todo[1] = %+v", got[1])
+	}
+}
+
+func TestBuildSummarizePrompt_WithTodos(t *testing.T) {
+	contents := []*genai.Content{
+		textContent("user", "Working on deployment"),
+	}
+	todos := []TodoItem{
+		{Content: "Fix auth bug", Status: "completed"},
+		{Content: "Deploy to staging", Status: "in_progress"},
+		{Content: "Write docs", Status: "pending"},
+	}
+
+	prompt := buildSummarizePrompt(contents, "", todos)
+
+	if !strings.Contains(prompt, "[Current todo list]") {
+		t.Error("should contain todo list header")
+	}
+	if !strings.Contains(prompt, "- [completed] Fix auth bug") {
+		t.Error("should contain completed todo")
+	}
+	if !strings.Contains(prompt, "- [in_progress] Deploy to staging") {
+		t.Error("should contain in_progress todo")
+	}
+	if !strings.Contains(prompt, "- [pending] Write docs") {
+		t.Error("should contain pending todo")
+	}
+	if !strings.Contains(prompt, "todos") {
+		t.Error("should instruct to restore todos")
+	}
+}
+
+func TestBuildSummarizePrompt_WithoutTodos(t *testing.T) {
+	contents := []*genai.Content{
+		textContent("user", "hello"),
+	}
+
+	prompt := buildSummarizePrompt(contents, "", nil)
+
+	if strings.Contains(prompt, "[Current todo list]") {
+		t.Error("should not contain todo list when nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: PluginConfig wires both callbacks
+// ---------------------------------------------------------------------------
+
+func TestPluginConfig_HasAfterModelCallback(t *testing.T) {
+	guard := New(newMockRegistry())
+	guard.Add("agent1", &mockLLM{name: "gpt-4o"})
+
+	cfg := guard.PluginConfig()
+	if len(cfg.Plugins) != 1 {
+		t.Fatalf("expected 1 plugin, got %d", len(cfg.Plugins))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: End-to-end — real tokens trigger compaction that heuristic misses
+// ---------------------------------------------------------------------------
+
+func TestThresholdStrategy_RealTokens_TriggersWhereHeuristicFails(t *testing.T) {
+	registry := newMockRegistry()
+	llm := &mockLLM{name: "gpt-4o", response: "compacted"}
+	s := newThresholdStrategy(registry, llm, 150_000)
+	ctx := newMockCallbackContext("agent1")
+
+	// Create a request where len/4 estimates ~50k tokens but "real" is 130k.
+	// With maxTokens=150k, threshold = 150k - 30k = 120k.
+	// Heuristic: 50k < 120k → no compaction.
+	// Real: 130k >= 120k → compaction.
+	req := &model.LLMRequest{
+		Model:    "gpt-4o",
+		Contents: makeLargeConversation(50_000),
+	}
+
+	heuristic := estimateTokens(req)
+	if heuristic >= 120_000 {
+		t.Skip("heuristic too high for this test scenario")
+	}
+
+	persistRealTokens(ctx, 130_000)
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if !strings.Contains(req.Contents[0].Parts[0].Text, "compacted") {
+		t.Error("real token count should have triggered compaction where heuristic wouldn't")
 	}
 }
