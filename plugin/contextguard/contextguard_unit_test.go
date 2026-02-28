@@ -401,7 +401,7 @@ func TestInjectSummary_AddsSummary(t *testing.T) {
 			textContent("user", "hello"),
 		},
 	}
-	injectSummary(req, "previous conversation about Go testing")
+	injectSummary(req, "previous conversation about Go testing", 0)
 
 	if len(req.Contents) != 2 {
 		t.Fatalf("expected 2 contents, got %d", len(req.Contents))
@@ -421,7 +421,7 @@ func TestInjectSummary_NoDuplicate(t *testing.T) {
 			textContent("user", "hello"),
 		},
 	}
-	injectSummary(req, "new summary")
+	injectSummary(req, "new summary", 0)
 
 	if len(req.Contents) != 2 {
 		t.Fatalf("expected no duplicate, got %d contents", len(req.Contents))

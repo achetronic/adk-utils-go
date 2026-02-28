@@ -692,7 +692,7 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 
 		existingSummary := loadSummary(ctx)
 		if existingSummary != "" {
-			injectSummary(req, existingSummary)
+			injectSummary(req, existingSummary, loadContentsAtCompaction(ctx))
 		}
 
 		if estimateTokens(req) < threshold {

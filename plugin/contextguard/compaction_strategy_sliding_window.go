@@ -65,7 +65,7 @@ func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LL
 
 	if turnsSinceCompaction <= s.maxTurns {
 		if existingSummary != "" {
-			injectSummary(req, existingSummary)
+			injectSummary(req, existingSummary, contentsAtLastCompaction)
 		}
 		return nil
 	}

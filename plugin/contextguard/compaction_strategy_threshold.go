@@ -71,8 +71,10 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 	threshold := contextWindow - buffer
 
 	existingSummary := loadSummary(ctx)
+	contentsAtLastCompaction := loadContentsAtCompaction(ctx)
+	totalSessionContents := len(req.Contents)
 	if existingSummary != "" {
-		injectSummary(req, existingSummary)
+		injectSummary(req, existingSummary, contentsAtLastCompaction)
 	}
 
 	totalTokens := tokenCount(ctx, req)
@@ -109,6 +111,7 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 	}
 
 	persistSummary(ctx, summary, totalTokens)
+	persistContentsAtCompaction(ctx, totalSessionContents)
 	replaceSummary(req, summary, nil)
 	injectContinuation(req, userContent)
 

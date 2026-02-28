@@ -665,10 +665,13 @@ func contentHasFunctionCall(c *genai.Content) bool {
 	return false
 }
 
-// injectSummary prepends a summary content block to the request. If a
-// summary block already exists as the first message, it is left untouched
-// to avoid duplicates.
-func injectSummary(req *model.LLMRequest, summary string) {
+// injectSummary replaces events that were already summarized with the
+// summary content block. contentsAtCompaction is the number of Content
+// entries in req.Contents when the summary was produced. Events after
+// that watermark are kept as-is (they are new since the last compaction).
+// If contentsAtCompaction is 0 or exceeds the current length, the summary
+// is simply prepended (first compaction or safety fallback).
+func injectSummary(req *model.LLMRequest, summary string, contentsAtCompaction int) {
 	summaryText := fmt.Sprintf("[Previous conversation summary]\n%s\n[End of summary — conversation continues below]", summary)
 
 	if len(req.Contents) > 0 && req.Contents[0] != nil &&
@@ -686,7 +689,13 @@ func injectSummary(req *model.LLMRequest, summary string) {
 			{Text: summaryText},
 		},
 	}
-	req.Contents = append([]*genai.Content{summaryContent}, req.Contents...)
+
+	if contentsAtCompaction > 0 && contentsAtCompaction <= len(req.Contents) {
+		newContents := req.Contents[contentsAtCompaction:]
+		req.Contents = append([]*genai.Content{summaryContent}, newContents...)
+	} else {
+		req.Contents = append([]*genai.Content{summaryContent}, req.Contents...)
+	}
 }
 
 // replaceSummary rewrites req.Contents to [summary + recentContents],

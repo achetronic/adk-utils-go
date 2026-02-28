@@ -129,13 +129,11 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 		cfg.tokenRatio = 2.0
 	}
 
-	// Loop detection: within a single turn, if both the user-msg step and
-	// the tool-results step compact, and the second didn't reduce below the
-	// first, that indicates a compaction loop. Repeated compactions across
-	// different turns with the same post-compaction size is normal behavior
-	// (incompressible system prompt dominates).
-	var turnFirstCompactionTokens int
-	var turnHadCompaction bool
+	// Loop detection: a compaction loop is when compaction fires but produces
+	// a result that is NOT smaller than the input (compaction had zero effect).
+	// This would happen if the summary is as large as the original conversation.
+	// We track this per-step, not per-turn, since each step independently
+	// rebuilds from session events and applies injectSummary.
 
 	// runLLMStep simulates one complete ADK runOneStep iteration:
 	//   preprocess → BeforeModelCallback → LLM → AfterModelCallback
@@ -163,21 +161,18 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 		compacted := tokensAfter < tokensBefore && loadSummary(ctx) != ""
 		if compacted {
 			result.compactions++
-			if turnHadCompaction && tokensAfter >= turnFirstCompactionTokens {
+			if tokensAfter >= tokensBefore {
 				result.loopDetected = true
-				t.Logf("Turn %d [%s]: LOOP — within-turn compaction didn't reduce: %d >= %d",
-					turnIdx, label, tokensAfter, turnFirstCompactionTokens)
-			}
-			if !turnHadCompaction {
-				turnFirstCompactionTokens = tokensAfter
-				turnHadCompaction = true
+				t.Logf("Turn %d [%s]: LOOP — compaction had no effect: %d >= %d",
+					turnIdx, label, tokensAfter, tokensBefore)
 			}
 		}
 
-		// Sync: in real ADK, the compacted contents become the session state.
-		// Next runOneStep will rebuild from events. We model this by updating
-		// our in-memory contents to match what beforeModel produced.
-		contents = cloneContents(req.Contents)
+		// NOTE: In real ADK, session events are append-only. The compacted
+		// req.Contents only affects this LLM call. ContentsRequestProcessor
+		// will rebuild from ALL events next time, and injectSummary strips
+		// the already-summarized events using the watermark. We do NOT
+		// update `contents` here — it represents the immutable event history.
 
 		// Step 3: Compute "real" token count — what the LLM would actually see.
 		// This is the ground truth for overflow detection.
@@ -207,9 +202,6 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 	}
 
 	for i, turn := range turns {
-		// Reset per-turn loop tracking
-		turnHadCompaction = false
-		turnFirstCompactionTokens = 0
 		// User sends a message → appended to session events by ADK runner
 		contents = append(contents, textContent("user", turn.userMessage))
 
