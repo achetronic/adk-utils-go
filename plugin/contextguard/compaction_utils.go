@@ -16,6 +16,7 @@ package contextguard
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -496,17 +497,27 @@ func estimatePartTokens(part *genai.Part) int {
 		total += len(part.FunctionResponse.Name) / 4
 		total += len(fmt.Sprintf("%v", part.FunctionResponse.Response)) / 4
 	}
+	if part.InlineData != nil {
+		total += len(part.InlineData.MIMEType) / 4
+		total += len(part.InlineData.Data) / 4
+	}
 	return total
 }
 
 // estimateTokens returns a rough token count for the entire LLM request
-// (contents + system instruction) using the ~4 chars per token heuristic.
+// (contents + system instruction + tool definitions) using the ~4 chars per
+// token heuristic. Tool definitions (function declarations with their JSON
+// schemas) are sent with every request and can consume significant tokens,
+// especially with MCP-sourced tools or complex parameter schemas.
 func estimateTokens(req *model.LLMRequest) int {
 	total := estimateContentTokens(req.Contents)
-	if req.Config != nil && req.Config.SystemInstruction != nil {
-		for _, part := range req.Config.SystemInstruction.Parts {
-			total += estimatePartTokens(part)
+	if req.Config != nil {
+		if req.Config.SystemInstruction != nil {
+			for _, part := range req.Config.SystemInstruction.Parts {
+				total += estimatePartTokens(part)
+			}
 		}
+		total += estimateToolTokens(req.Config.Tools)
 	}
 	return total
 }
@@ -527,10 +538,44 @@ func estimateContentTokens(contents []*genai.Content) int {
 	return total
 }
 
+// estimateToolTokens returns a rough token count for the tool definitions
+// attached to the request. Tool declarations (name, description, and
+// parameter JSON schemas) are serialized and sent with every LLM call.
+// For agents with many tools or complex schemas (e.g. MCP-sourced tools),
+// this can amount to thousands of tokens that must be counted to avoid
+// underestimating the total prompt size.
+func estimateToolTokens(tools []*genai.Tool) int {
+	total := 0
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		for _, fd := range tool.FunctionDeclarations {
+			if fd == nil {
+				continue
+			}
+			total += len(fd.Name) / 4
+			total += len(fd.Description) / 4
+			if fd.ParametersJsonSchema != nil {
+				data, err := json.Marshal(fd.ParametersJsonSchema)
+				if err == nil {
+					total += len(data) / 4
+				}
+			} else if fd.Parameters != nil {
+				data, err := json.Marshal(fd.Parameters)
+				if err == nil {
+					total += len(data) / 4
+				}
+			}
+		}
+	}
+	return total
+}
+
 // computeBuffer returns the token buffer for a given context window:
-// fixed 20k for windows >200k, 20% for smaller ones.
+// fixed 20k for windows >=200k, 20% for smaller ones.
 func computeBuffer(contextWindow int) int {
-	if contextWindow > largeContextWindowThreshold {
+	if contextWindow >= largeContextWindowThreshold {
 		return largeContextWindowBuffer
 	}
 	return int(float64(contextWindow) * smallContextWindowRatio)

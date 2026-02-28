@@ -6,7 +6,7 @@ How the threshold strategy decides when and how to compact a conversation.
 
 | Step | What happens | Why |
 |------|-------------|-----|
-| 1. **Estimate tokens** | Calculate how many tokens the current conversation uses. If real token counts from the provider are available, a correction factor (`real / previous heuristic`) is applied. Otherwise, the `len/4` heuristic is multiplied by 2.0x | The heuristic alone underestimates by 2-3x on structured content (JSON, tool schemas) |
+| 1. **Estimate tokens** | Calculate how many tokens the current conversation uses, including contents, system instruction, and tool definitions. If real token counts from the provider are available, a correction factor (`real / previous heuristic`) is applied. Otherwise, the `len/4` heuristic is multiplied by 2.5x | The heuristic alone underestimates by 2-3x on structured content (JSON, tool schemas). Tool definitions and InlineData (images) are now counted in the heuristic. |
 | 2. **Compare against threshold** | If estimated tokens < `window - buffer`, do nothing. Buffer = fixed 20k for windows >200k, 20% for smaller windows | The buffer leaves room for the LLM response and error margin |
 | 3. **Truncate for the summarizer** | If the conversation is huge, drop the oldest messages until it fits within 80% of the summarizer LLM's context window | Prevents the summarization call itself from blowing up |
 | 4. **Summarize everything** | Send the entire conversation to the LLM with a structured prompt. If the LLM call fails, fall back to a mechanical summary (first 200 chars of each message) | A summary is always produced — the bloated conversation is never passed through |
@@ -28,20 +28,20 @@ How the threshold strategy decides when and how to compact a conversation.
 The `len(text)/4` heuristic drastically underestimates real token counts. To bridge the gap between `AfterModelCallback` (where real tokens arrive) and `BeforeModelCallback` (where the decision must be made), a calibrated heuristic is used:
 
 ```
-currentHeuristic  = estimateTokens(req)                          # on the current request
+currentHeuristic  = estimateTokens(req)                          # on the current request (contents + system + tools)
 correction        = clamp(realTokens / lastHeuristic, 1.0, 5.0) # how much len/4 was off last time
 calibrated        = currentHeuristic × correction                # scale to real-token space
 result            = max(realTokens, calibrated)                  # never undercount
 ```
 
-If no real tokens exist yet (first turn or provider doesn't report usage), the default factor of 1.5x is used.
+If no real tokens exist yet (first turn or provider doesn't report usage), the default factor of 2.5x is used.
 
 ## Buffer calculation
 
 | Context window | Buffer | Threshold | Rationale |
 |---------------|--------|-----------|-----------|
-| >200k (e.g. 200k) | 20k fixed | 180k | Large windows don't need proportional buffers |
-| ≤200k (e.g. 8k) | 20% (1.6k) | 6.4k | Small windows need proportional headroom |
+| >=200k (e.g. 200k) | 20k fixed | 180k | Large windows don't need proportional buffers |
+| <200k (e.g. 8k) | 20% (1.6k) | 6.4k | Small windows need proportional headroom |
 
 ## Post-compaction result
 
@@ -65,7 +65,7 @@ After compaction:
 | `compaction_strategy_threshold.go` | The `Compact()` method — the flow described above |
 | `compaction_utils.go` | Token estimation, calibration, summarization, truncation, state helpers |
 | `contextguard.go` | `BeforeModelCallback` (calls Compact + persists heuristic), `AfterModelCallback` (persists real tokens), constants |
-| `compaction_strategy_multiturn_test.go` | 47 multi-turn session simulations testing the full ADK flow |
+| `compaction_strategy_multiturn_test.go` | 91 multi-turn session simulations testing the full ADK flow |
 | `compaction_strategy_singleshot_test.go` | Single-shot `Compact()` tests with realistic conversations |
 | `contextguard_unit_test.go` | Unit tests for individual functions |
 
@@ -175,9 +175,9 @@ The simulator no longer replaces `contents` after compaction. In real ADK, sessi
 
 New `responseSize` field on `turnConfig` allows tests to specify how large the model's text response is. Default is 120 chars.
 
-### Test suite (47 tests total)
+### Test suite (91 tests total)
 
-#### Category 1: Stress tests (`TestStress_*`) — 27 tests
+#### Category 1: Stress tests (`TestStress_*`) — 42 tests
 
 | Test | Window | Turns | Ratio | UsageMetadata | Tools |
 |------|--------|-------|-------|---------------|-------|
@@ -194,6 +194,14 @@ New `responseSize` field on `turnConfig` allows tests to specify how large the m
 | `200k_RepeatedCompactions` | 200k | 60 | 2.0 | yes | every 2nd (30k+10k) |
 | `200k_LateUsageMetadata` | 200k | 5+20 | 2.0→2.5 | no→yes | 1/turn (5-10k) |
 | `200k_100Turns_MixedWorkload` | 200k | 100 | 2.3 | yes | mixed (1k-50k) |
+| `200k_KubeAgent` | 200k | 20 | 2.5 | yes | kubectl_get_pods (15k) + describe (10k) + logs (25k) |
+| `200k_MixedDebugSession` | 200k | 25 | 2.2 | yes | prometheus (20k) + sql (15k) + http (500) + grep (8k) mixed |
+| `200k_PureToolStorm` | 200k | 30 | 2.0 | yes | 2/turn (5k each), minimal text |
+| `200k_CodingAgent` | 200k | 15 | 2.5 | yes | read_file (8k) → edit_file (2k) → run_tests (12k) sequential |
+| `1M_NormalConversation` | 1M | 50 | 2.0 | yes | 1/turn (10k) |
+| `1M_HeavyTools` | 1M | 30 | 2.0 | yes | read_file (50k) + grep (20k) + tests (30k) |
+| `4k_NormalConversation` | 4k | 20 | 1.8 | yes | none |
+| `4k_WithSmallTools` | 4k | 10 | 1.8 | yes | 1/turn (500) |
 | `8k_NormalConversation` | 8k | 20 | 1.8 | yes | none |
 | `8k_SmallToolCalls` | 8k | 15 | 1.8 | yes | 1/turn (1k) |
 | `8k_LargeToolResponse` | 8k | 3 | 1.8 | yes | 1×20k |
@@ -206,9 +214,17 @@ New `responseSize` field on `turnConfig` allows tests to specify how large the m
 | `8k_RapidFireShortMessages` | 8k | 80 | 1.8 | yes | none |
 | `8k_RepeatedCompactions` | 8k | 40 | 1.8 | yes | 1/turn (2k) |
 | `8k_AlternatingToolAndText` | 8k | 30 | 2.0 | yes | every 2nd (3k) |
+| `8k_KubeAgent` | 8k | 10 | 2.0 | yes | kubectl_get_pods (5k) + describe (3k) + logs (8k) |
+| `8k_MixedDebugSession` | 8k | 20 | 1.8 | yes | prometheus (3k) + sql (2k) + http (200) mixed |
+| `8k_PureToolStorm` | 8k | 20 | 1.8 | yes | 1/turn (2k), minimal text |
+| `8k_CodingAgent` | 8k | 10 | 2.0 | yes | read_file (3k) → edit_file (1k) → run_tests (4k) sequential |
+| `200k_HeavyToolDefinitions` | 200k | 30 | 2.0 | yes | 2/turn (5k+8k), 20 MCP tool defs (2k schema each) |
+| `200k_InlineImages` | 200k | 15 | 2.0 | yes | none, 100KB image/turn |
+| `8k_HeavyToolDefinitions` | 8k | 20 | 2.0 | yes | 1/turn (1.5k), 10 MCP tool defs (1k schema each) |
+| `8k_InlineSmallImages` | 8k | 10 | 2.0 | yes | none, 10KB image/turn |
 | `CompactionNoInfiniteLoop` | 8k | 5 | 2.5 | yes | none, 12k system |
 
-#### Category 2: Brutal tests (`TestBrutal_*`) — 17 tests
+#### Category 2: Brutal tests (`TestBrutal_*`) — 49 tests
 
 Extreme scenarios designed to break the compaction system:
 
@@ -232,18 +248,41 @@ Extreme scenarios designed to break the compaction system:
 | `200k_TokenRatio_5x` | 200k | 10 | 5.0 | Extreme 5× underestimation |
 | `200k_SingleTurnFillsWindow` | 200k | 2 | 2.0 | 20 parallel tools × 30k = 600k |
 | `200k_200Turns` | 200k | 200 | 2.2 | Extreme session length with mixed tools |
-
-#### Category 3: Sequential tool chain tests — 3 tests
-
-| Test | Window | Turns | Ratio | UsageMetadata | Tools/turn | Tool sizes | BeforeModelCallback calls/turn |
-|------|--------|-------|-------|---------------|------------|------------|-------------------------------|
-| `8k_SequentialToolChain` | 8k | 8 | 2.0 | yes | 5 sequential | 2k, 1.5k, 2.5k, 1k, 1.5k | 6 (1 user-msg + 5 tool-chain) |
-| `200k_SequentialToolChain_LargeResponses` | 200k | 5 | 2.0 | yes | 5 sequential | 40k, 20k, 30k, 15k, 5k | 6 |
-| `8k_SequentialChain_NoUsageMetadata` | 8k | 10 | 2.0 | no | 3 sequential | 1k, 800, 1.2k | 4 |
+| `200k_ToolDefinitionsDominateWindow` | 200k | 20 | 2.5 | 50 MCP tools × 4k schema + 3 tool calls/turn |
+| `200k_ToolDefinitionsHighRatio` | 200k | 15 | 3.5 | 30 MCP tools × 3k schema, high ratio |
+| `200k_LargeInlineDocuments` | 200k | 3 | 2.0 | 500KB + 300KB inline PDFs |
+| `200k_MultipleInlinePerTurn` | 200k | 8 | 2.0 | 3 images/turn (80k+60k+90k) |
+| `200k_ToolDefsAndInlineImages` | 200k | 20 | 2.5 | 15 MCP tools + images every 3rd turn (production scenario) |
+| `200k_ToolDefsAndInlineNoUsageMetadata` | 200k | 15 | 2.0 | 10 MCP tools + images + no calibration |
+| `8k_ToolDefinitionsNoUsageMetadata` | 8k | 15 | 2.0 | 8 MCP tools (800ch schema) + no calibration |
+| `8k_ToolDefsAndInlineCombined` | 8k | 20 | 2.0 | 5 MCP tools + images + tools + no calibration (all blind spots) |
+| `200k_KubeAgent_30Rounds` | 200k | 30 | 2.5 | kubectl_get_pods (20k) + describe (15k) + logs (40k), kube agent pattern |
+| `200k_MixedDebugSession_LongInvestigation` | 200k | 50 | 2.3 | prometheus (30k) + grafana (10k) + sql (20k) + http + grep mixed |
+| `200k_PureToolStorm_HugeResponses` | 200k | 20 | 2.0 | fetch (50k) + process (20k) per turn, minimal text |
+| `8k_PureToolStorm_50Turns` | 8k | 50 | 2.0 | 3k tool/turn, minimal text, 50 turns |
+| `200k_CodingAgent_DeepRefactor` | 200k | 25 | 2.5 | 6 sequential tools/turn (read+grep+edit+read+edit+tests), large outputs |
+| `8k_CodingAgent_NoUsageMetadata` | 8k | 15 | 2.0 | Sequential read→edit→tests, no calibration |
+| `4k_ToolResponseExceedsWindow` | 4k | 3 | 2.0 | Single 20k tool response (5× window) |
+| `4k_EveryTurnExceedsWindow` | 4k | 20 | 2.0 | 1k msg + 8k tool every turn |
+| `4k_KubeAgent` | 4k | 10 | 2.0 | kubectl pattern in tiny window |
+| `4k_CodingAgent` | 4k | 10 | 2.0 | Sequential read→edit→tests in tiny window |
+| `4k_MixedDebug` | 4k | 15 | 2.0 | prometheus + sql + http mixed in 4k |
+| `4k_PureToolStorm` | 4k | 20 | 2.0 | 2k tool/turn, minimal text in 4k |
+| `1M_KubeAgent_ExtremeLongevity` | 1M | 100 | 2.0 | kubectl (30k+20k+50k) per turn, 100 turns |
+| `1M_PureToolStorm_MonsterResponses` | 1M | 50 | 2.0 | 100k tool/turn, 50 turns |
+| `1M_NoUsageMetadata` | 1M | 40 | 2.5 | 45k tools/turn, no calibration, 1M window |
+| `200k_MagecProductionScenario` | 200k | 30 | 2.5 | 25 MCP tools + images + 2-4 tool calls/turn (exact production setup) |
+| `200k_MagecProductionScenario_NoUsageMetadata` | 200k | 20 | 2.5 | 20 MCP tools + images + no calibration |
+| `200k_SequentialEscalatingSizes` | 200k | 10 | 2.0 | 5 sequential tools escalating: 2k→5k→20k→40k→60k |
+| `8k_SequentialEscalatingSizes` | 8k | 10 | 2.0 | 4 sequential tools escalating: 500→1.5k→3k→5k |
+| `4k_SequentialEscalatingSizes` | 4k | 8 | 2.0 | 3 sequential tools escalating: 300→800→2k |
+| `8k_SequentialToolChain` | 8k | 8 | 2.0 | 5 sequential tools (2k, 1.5k, 2.5k, 1k, 1.5k) |
+| `200k_SequentialToolChain_LargeResponses` | 200k | 5 | 2.0 | 5 sequential tools (40k, 20k, 30k, 15k, 5k) |
+| `8k_SequentialChain_NoUsageMetadata` | 8k | 10 | 2.0 | 3 sequential tools (1k, 800, 1.2k), no calibration |
 
 ### Known limitation
 
-`TestBrutal_8k_NoUsageMetadata_BeyondDefault` documents that when `tokenRatio > defaultHeuristicCorrectionFactor (2.0)` and the provider doesn't report `UsageMetadata`, the system has no way to learn the real ratio. Providers that don't report `UsageMetadata` should use `WithMaxTokens()` with a conservative override.
+`TestBrutal_8k_NoUsageMetadata_BeyondDefault` documents that when `tokenRatio > defaultHeuristicCorrectionFactor (2.5)` and the provider doesn't report `UsageMetadata`, the system has no way to learn the real ratio. Providers that don't report `UsageMetadata` should use `WithMaxTokens()` with a conservative override.
 
 ---
 
@@ -315,3 +354,90 @@ Session
 ### Why the tests didn't catch it
 
 The simulator treated `contents` as mutable state that got replaced after compaction, rather than as an append-only event log. With that shortcut, `injectSummary` never had to deal with the full event history. The fix to the simulator makes it model reality, where `injectSummary` must actively strip old events using the watermark.
+
+---
+
+## Fix: token estimation blind spots (production overflow)
+
+### The bug
+
+ContextGuard never fired compaction on a 200k context window with `claude-sonnet-4-6`. Anthropic returned `400 Bad Request: prompt is too long: 200819 tokens` — the context was exceeded without any compaction attempt.
+
+```
+time=2026-02-28T13:52:44Z level=ERROR msg="prompt is too long: 200819 tokens"
+time=2026-02-28T13:55:11Z level=ERROR msg="prompt is too long: 200911 tokens"
+```
+
+No `ContextGuard [threshold]: threshold exceeded` log appeared — `tokenCount()` never reached the threshold.
+
+### Root cause: three blind spots in token estimation
+
+**1. Tool definitions not counted.** `estimateTokens()` counted `req.Contents` and `req.Config.SystemInstruction`, but completely ignored `req.Config.Tools`. Tool declarations (name, description, JSON parameter schemas) are serialized and sent with every LLM call. For agents with multiple tools or complex schemas (especially MCP-sourced), this can be thousands of tokens invisible to the heuristic.
+
+**2. InlineData not counted.** `estimatePartTokens()` handled `Text`, `FunctionCall`, and `FunctionResponse` parts, but `InlineData` (arbitrary binary blobs: images, PDFs, audio, video) was counted as 0 tokens. A single base64-encoded image can be tens of thousands of tokens.
+
+**3. Buffer boundary off-by-one.** `computeBuffer()` used `contextWindow > 200000` — for a 200k window exactly, this was `false`, so the 20% ratio applied instead of the fixed 20k buffer. Result: buffer = 40k, threshold = 160k instead of the intended buffer = 20k, threshold = 180k. Not the primary cause, but it moved the threshold 20k lower than designed.
+
+**4. Default correction factor too conservative.** `defaultHeuristicCorrectionFactor` was 2.0, but real-world structured content (JSON tool schemas, markdown, non-ASCII) typically underestimates by 2-3x. With tool definitions invisible and a 2.0 factor, the heuristic couldn't reach the threshold even with calibration capped at 5x.
+
+### Why calibration couldn't save it
+
+In the production session, the heuristic saw ~24k tokens but Anthropic counted ~200k — a ratio of **8.3x**. The calibration system bridges this gap using `correction = realTokens / lastHeuristic`, but:
+
+- The correction factor is capped at 5.0x to prevent anomalous turns from distorting future estimates
+- 24k × 5.0 = 120k, still below the 160k threshold (with the old buffer)
+- `max(realTokens, calibrated)` returns the stale `realTokens` from the previous turn, which hadn't exceeded the threshold yet
+- The conversation grew by ~50k tokens in a single turn (new user message + tool results), pushing past 200k
+
+The fundamental problem: when the heuristic is missing entire categories of token-consuming content (tools, inline data), the calibration correction factor cannot compensate fast enough.
+
+### The fixes
+
+**`compaction_utils.go` — `estimateToolTokens()` (new function)**
+
+```go
+func estimateToolTokens(tools []*genai.Tool) int {
+    // Counts name + description + marshaled JSON schema for each FunctionDeclaration
+}
+```
+
+`estimateTokens()` now calls `estimateToolTokens(req.Config.Tools)` alongside contents and system instruction.
+
+**`compaction_utils.go` — `estimatePartTokens()` now counts InlineData**
+
+```go
+if part.InlineData != nil {
+    total += len(part.InlineData.MIMEType) / 4
+    total += len(part.InlineData.Data) / 4
+}
+```
+
+`InlineData` is a generic `*genai.Blob` carrying raw bytes + MIME type — it covers images, PDFs, audio, video, and any other binary content. The fix counts all of them.
+
+**`compaction_utils.go` — `computeBuffer()` boundary fix**
+
+```go
+// Before: contextWindow > largeContextWindowThreshold  (200k > 200k = false)
+// After:  contextWindow >= largeContextWindowThreshold  (200k >= 200k = true)
+```
+
+200k windows now get the fixed 20k buffer (threshold = 180k) instead of the 20% buffer of 40k (threshold = 160k).
+
+**`contextguard.go` — `defaultHeuristicCorrectionFactor` raised to 2.5**
+
+From 2.0 to 2.5. Accounts for the typical 2-3x underestimation of `len/4` on structured content, plus the overhead from tool definitions and system prompts that tokenize denser than plain text. Conservative enough to avoid premature compaction, aggressive enough to catch real overflow before calibration data is available.
+
+### Tests added
+
+| Test | What it validates |
+|------|-------------------|
+| `TestEstimateToolTokens_Nil` | nil tools → 0 tokens |
+| `TestEstimateToolTokens_WithDeclarations` | 2 tools with `ParametersJsonSchema` → >50 tokens |
+| `TestEstimateToolTokens_WithParametersSchema` | Tools using `*genai.Schema` instead of raw JSON |
+| `TestEstimateTokens_IncludesTools` | `estimateTokens(req with tools) > estimateTokens(req without tools)` |
+| `TestEstimatePartTokens_InlineData` | 10k bytes of inline data → counted at ≥ `len/4` tokens |
+| `TestComputeBuffer/exactly_at_threshold` | 200k window → 20k buffer (was 40k) |
+
+### Why `WithMaxTokens(180000)` worked as a workaround
+
+Setting `maxTokens = 180000` bypasses the registry lookup. `computeBuffer(180000)` → `180000 < 200000` → buffer = 36k → threshold = 144k. With `realTokens` from `afterModel` persisted at ~180k (previous turn), `tokenCount()` returned `max(180000, calibrated) ≥ 180000 > 144000` → compaction fired. The lower threshold made it possible for the stale `realTokens` alone to exceed it, sidestepping the heuristic blind spots entirely.

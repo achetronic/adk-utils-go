@@ -304,7 +304,7 @@ func TestComputeBuffer(t *testing.T) {
 		want          int
 	}{
 		{"large window (250k)", 250_000, 20_000},
-		{"exactly at threshold (200k)", 200_000, 40_000},
+		{"exactly at threshold (200k)", 200_000, 20_000},
 		{"small window (50k)", 50_000, 10_000},
 		{"tiny window (10k)", 10_000, 2_000},
 	}
@@ -315,6 +315,141 @@ func TestComputeBuffer(t *testing.T) {
 				t.Errorf("computeBuffer(%d) = %d, want %d", tt.contextWindow, got, tt.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: estimateToolTokens
+// ---------------------------------------------------------------------------
+
+func TestEstimateToolTokens_Nil(t *testing.T) {
+	got := estimateToolTokens(nil)
+	if got != 0 {
+		t.Errorf("estimateToolTokens(nil) = %d, want 0", got)
+	}
+}
+
+func TestEstimateToolTokens_WithDeclarations(t *testing.T) {
+	tools := []*genai.Tool{
+		{
+			FunctionDeclarations: []*genai.FunctionDeclaration{
+				{
+					Name:        "search_memory",
+					Description: "Search long-term memory for relevant entries matching the query.",
+					ParametersJsonSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"query": map[string]any{
+								"type":        "string",
+								"description": "The search query to find relevant memories.",
+							},
+						},
+						"required": []string{"query"},
+					},
+				},
+				{
+					Name:        "save_to_memory",
+					Description: "Save a new entry to long-term memory.",
+					ParametersJsonSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"content":  map[string]any{"type": "string", "description": "The content to save."},
+							"category": map[string]any{"type": "string", "description": "Category for the memory entry."},
+						},
+						"required": []string{"content"},
+					},
+				},
+			},
+		},
+	}
+	got := estimateToolTokens(tools)
+	if got <= 0 {
+		t.Errorf("estimateToolTokens(2 tools) = %d, want > 0", got)
+	}
+	if got < 50 {
+		t.Errorf("estimateToolTokens(2 tools with schemas) = %d, expected at least 50 tokens", got)
+	}
+}
+
+func TestEstimateToolTokens_WithParametersSchema(t *testing.T) {
+	tools := []*genai.Tool{
+		{
+			FunctionDeclarations: []*genai.FunctionDeclaration{
+				{
+					Name:        "exec",
+					Description: "Execute a shell command.",
+					Parameters: &genai.Schema{
+						Type: "object",
+						Properties: map[string]*genai.Schema{
+							"command": {Type: "string", Description: "The command to execute."},
+							"timeout": {Type: "integer", Description: "Timeout in seconds."},
+						},
+						Required: []string{"command"},
+					},
+				},
+			},
+		},
+	}
+	got := estimateToolTokens(tools)
+	if got <= 0 {
+		t.Errorf("estimateToolTokens(Parameters schema) = %d, want > 0", got)
+	}
+}
+
+func TestEstimateTokens_IncludesTools(t *testing.T) {
+	tools := []*genai.Tool{
+		{
+			FunctionDeclarations: []*genai.FunctionDeclaration{
+				{
+					Name:        "big_tool",
+					Description: strings.Repeat("d", 400),
+					ParametersJsonSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"param1": map[string]any{"type": "string", "description": strings.Repeat("x", 200)},
+							"param2": map[string]any{"type": "string", "description": strings.Repeat("y", 200)},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	reqWithoutTools := &model.LLMRequest{
+		Contents: []*genai.Content{textContent("user", strings.Repeat("a", 400))},
+	}
+	reqWithTools := &model.LLMRequest{
+		Contents: []*genai.Content{textContent("user", strings.Repeat("a", 400))},
+		Config:   &genai.GenerateContentConfig{Tools: tools},
+	}
+
+	withoutTokens := estimateTokens(reqWithoutTools)
+	withTokens := estimateTokens(reqWithTools)
+
+	if withTokens <= withoutTokens {
+		t.Errorf("estimateTokens with tools (%d) should be > without tools (%d)", withTokens, withoutTokens)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: estimatePartTokens with InlineData
+// ---------------------------------------------------------------------------
+
+func TestEstimatePartTokens_InlineData(t *testing.T) {
+	imageData := []byte(strings.Repeat("A", 10000))
+	part := &genai.Part{
+		InlineData: &genai.Blob{
+			MIMEType: "image/png",
+			Data:     imageData,
+		},
+	}
+	got := estimatePartTokens(part)
+	if got <= 0 {
+		t.Errorf("estimatePartTokens(InlineData) = %d, want > 0", got)
+	}
+	expectedMin := len(imageData) / 4
+	if got < expectedMin {
+		t.Errorf("estimatePartTokens(InlineData 10k) = %d, want >= %d", got, expectedMin)
 	}
 }
 

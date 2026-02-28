@@ -88,11 +88,11 @@ adk-utils-go/
 │   └── contextguard/
 │       ├── contextguard.go                        # Public API: New(), Add(), PluginConfig(), BeforeModel/AfterModel callbacks
 │       ├── contextguard_unit_test.go               # 93 unit tests covering all functions + timing gap proofs
-│       ├── compaction_strategy_multiturn_test.go   # 25 multi-turn session simulations (200k/8k, tools, ratios, loops)
+│       ├── compaction_strategy_multiturn_test.go   # 91 multi-turn session simulations (4k/8k/200k/1M, kube/coding/debug/storm patterns, tool defs, inline data, ratios, loops)
 │       ├── compaction_strategy_singleshot_test.go  # Single-shot Compact() tests: kube-agent, mixed-debug, tool-storm, timing gap
 │       ├── model_registry.go                       # ModelRegistry interface (ContextWindow, DefaultMaxTokens)
 │       ├── model_registry_crush.go                 # CrushRegistry: catwalk embedded DB, 564 models, zero network
-│       ├── compaction_utils.go                     # Internal helpers: state, summarization, tokens, calibration, splitting, continuation, todos, truncation
+│       ├── compaction_utils.go                     # Internal helpers: state, summarization, tokens (contents + system + tools + inline data), calibration, splitting, continuation, todos, truncation
 │       ├── compaction_strategy_threshold.go        # Token-threshold strategy (Crush-style full summary + hardening)
 │       └── compaction_strategy_sliding_window.go   # Sliding-window strategy (turn-count, with recent tail + retry)
 ├── examples/
@@ -348,7 +348,7 @@ Cover 200k and 8k context windows, token ratios 1.5x-4.0x, with/without UsageMet
 | `threshold` | calibrated tokens > (contextWindow - buffer) | Full summary (entire conversation) | `WithMaxTokens(n)` or auto from registry |
 | `sliding_window` | turns since last compaction > maxTurns | Split: summarize old, keep recent tail | `WithSlidingWindow(n)` |
 
-Buffer: fixed 20k for windows >200k, 20% for smaller ones.
+Buffer: fixed 20k for windows >=200k, 20% for smaller ones.
 
 ### Compaction Flow (threshold)
 

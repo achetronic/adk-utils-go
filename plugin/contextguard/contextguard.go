@@ -76,11 +76,13 @@ const (
 	maxCompactionAttempts = 3
 
 	// defaultHeuristicCorrectionFactor is applied to the len/4 heuristic
-	// when no real token data is available for calibration. The value 2.0
-	// accounts for the typical 2x underestimation of len/4 on structured
-	// content (JSON tool schemas, markdown, non-ASCII). This ensures
-	// compaction fires early enough even without provider token counts.
-	defaultHeuristicCorrectionFactor = 2.0
+	// when no real token data is available for calibration. The value 2.5
+	// accounts for the typical 2-3x underestimation of len/4 on structured
+	// content (JSON tool schemas, markdown, non-ASCII, overhead from tool
+	// definitions and system prompts that tokenize denser than plain text).
+	// This ensures compaction fires early enough even without provider
+	// token counts.
+	defaultHeuristicCorrectionFactor = 2.5
 
 	// maxCorrectionFactor caps the calibration ratio to prevent a single
 	// turn with unusual content (e.g. JSON-heavy tool schemas) from

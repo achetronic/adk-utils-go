@@ -48,14 +48,21 @@ type sessionConfig struct {
 	systemPromptSize int
 	modelName        string
 	hasUsageMetadata bool
-	tokenRatio       float64 // real_tokens / heuristic_tokens (simulates tokenizer accuracy)
+	tokenRatio       float64      // real_tokens / heuristic_tokens (simulates tokenizer accuracy)
+	tools            []*genai.Tool // tool definitions attached to every LLM request
 }
 
 type turnConfig struct {
 	userMessage  string
 	toolCalls    []toolCall
-	responseSize int // chars in model's text response (0 = default ~120 chars)
+	responseSize int  // chars in model's text response (0 = default ~120 chars)
 	sequential   bool // if true, each toolCall is a separate round (sequential chain)
+	inlineData   []inlineAttachment // inline blobs attached to the user message
+}
+
+type inlineAttachment struct {
+	mimeType string
+	size     int // bytes of data
 }
 
 type toolCall struct {
@@ -148,6 +155,9 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 		if systemInstruction != nil {
 			req.Config.SystemInstruction = systemInstruction
 		}
+		if len(cfg.tools) > 0 {
+			req.Config.Tools = cfg.tools
+		}
 
 		// Step 2: BeforeModelCallback (ContextGuard)
 		tokensBefore := estimateTokens(req)
@@ -203,7 +213,16 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 
 	for i, turn := range turns {
 		// User sends a message → appended to session events by ADK runner
-		contents = append(contents, textContent("user", turn.userMessage))
+		userParts := []*genai.Part{{Text: turn.userMessage}}
+		for _, att := range turn.inlineData {
+			userParts = append(userParts, &genai.Part{
+				InlineData: &genai.Blob{
+					MIMEType: att.mimeType,
+					Data:     make([]byte, att.size),
+				},
+			})
+		}
+		contents = append(contents, &genai.Content{Role: "user", Parts: userParts})
 
 		// === ADK inner loop iteration 1: process user message ===
 		runLLMStep(i, "user-msg")
@@ -333,6 +352,36 @@ func toolResponse(name string, size int) string {
 		bodySize = 10
 	}
 	return header + `"` + strings.Repeat("a]b}c,d:e[f{g\"h", bodySize/16+1)[:bodySize] + `"` + footer
+}
+
+// makeMCPTools generates a set of realistic tool definitions simulating an MCP
+// server that exposes n tools, each with a JSON schema of approximately
+// schemaSize characters.
+func makeMCPTools(n, schemaSize int) []*genai.Tool {
+	var decls []*genai.FunctionDeclaration
+	for i := range n {
+		props := make(map[string]any)
+		propCount := schemaSize / 120
+		if propCount < 1 {
+			propCount = 1
+		}
+		for j := range propCount {
+			props[fmt.Sprintf("param_%d", j)] = map[string]any{
+				"type":        "string",
+				"description": fmt.Sprintf("Parameter %d for tool %d. %s", j, i, strings.Repeat("Detailed description. ", schemaSize/(propCount*60)+1)[:60]),
+			}
+		}
+		decls = append(decls, &genai.FunctionDeclaration{
+			Name:        fmt.Sprintf("mcp_tool_%d", i),
+			Description: fmt.Sprintf("Tool %d from MCP server. %s", i, strings.Repeat("Performs complex operations on the system. ", schemaSize/100+1)[:100]),
+			ParametersJsonSchema: map[string]any{
+				"type":       "object",
+				"properties": props,
+				"required":   []string{"param_0"},
+			},
+		})
+	}
+	return []*genai.Tool{{FunctionDeclarations: decls}}
 }
 
 // ==========================================================================
@@ -1782,5 +1831,1444 @@ func TestBrutal_8k_SequentialChain_NoUsageMetadata(t *testing.T) {
 	}
 	if r.compactions == 0 {
 		t.Error("expected compactions")
+	}
+}
+
+// ==========================================================================
+// TOOL DEFINITIONS TESTS — verify that tool schemas are counted in the
+// heuristic and compaction fires before overflow.
+// ==========================================================================
+
+// TestStress_200k_HeavyToolDefinitions tests a 200k window where 20 MCP tools
+// with large schemas (~2k each) are attached to every request. The tool
+// definitions alone consume ~10k heuristic tokens, and with the tokenRatio
+// the real cost is ~20k. Without counting tools, the heuristic would miss
+// this overhead entirely.
+func TestStress_200k_HeavyToolDefinitions(t *testing.T) {
+	tools := makeMCPTools(20, 2_000)
+	turns := make([]turnConfig, 30)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Use the MCP tools to inspect the infrastructure", i),
+			toolCalls: []toolCall{
+				{name: "mcp_tool_0", responseSize: 5_000},
+				{name: "mcp_tool_5", responseSize: 8_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 3_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("200k/heavy-tool-defs: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k with heavy tool definitions should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected at least one compaction with heavy tools + responses")
+	}
+}
+
+// TestStress_8k_HeavyToolDefinitions tests a tiny 8k window where 10 MCP
+// tools with ~1k schemas each are attached. The tools alone eat ~2.5k
+// heuristic tokens (~5k real), leaving very little room for conversation.
+func TestStress_8k_HeavyToolDefinitions(t *testing.T) {
+	tools := makeMCPTools(10, 1_000)
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: run diagnostics", i),
+			toolCalls:   []toolCall{{name: "mcp_tool_0", responseSize: 1_500}},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 400,
+		modelName:        "custom-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("8k/heavy-tool-defs: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k with heavy tool definitions should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions in 8k with large tool schemas")
+	}
+}
+
+// TestBrutal_200k_ToolDefinitionsDominateWindow tests the extreme case where
+// tool definitions are so large they consume a significant portion of the
+// context window. 50 tools × 4k schema each ≈ 50k heuristic tokens from
+// tools alone. The heuristic must account for these to avoid overflow.
+func TestBrutal_200k_ToolDefinitionsDominateWindow(t *testing.T) {
+	tools := makeMCPTools(50, 4_000)
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: analyze the cluster state comprehensively", i),
+			toolCalls: []toolCall{
+				{name: "mcp_tool_0", responseSize: 10_000},
+				{name: "mcp_tool_10", responseSize: 15_000},
+				{name: "mcp_tool_20", responseSize: 5_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 5_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.5,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("brutal/200k-tool-defs-dominate: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k with dominating tool definitions should not overflow")
+	}
+}
+
+// TestBrutal_8k_ToolDefinitionsNoUsageMetadata tests the worst case: large
+// tool schemas on a small window with no calibration data. The default
+// correction factor must compensate for both content underestimation and
+// the tool overhead.
+func TestBrutal_8k_ToolDefinitionsNoUsageMetadata(t *testing.T) {
+	tools := makeMCPTools(8, 800)
+	turns := make([]turnConfig, 15)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: check system status", i),
+			toolCalls:   []toolCall{{name: "mcp_tool_0", responseSize: 1_000}},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 300,
+		modelName:        "custom-model",
+		hasUsageMetadata: false,
+		tokenRatio:       2.0,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("brutal/8k-tool-defs-no-usage: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k with tool definitions and no usage metadata should not overflow")
+	}
+}
+
+// TestBrutal_200k_ToolDefinitionsHighRatio tests high token ratio (3.5x) with
+// large tool schemas. Simulates JSON-heavy tool definitions where the
+// tokenizer is particularly aggressive (many structural tokens for brackets,
+// colons, quotes).
+func TestBrutal_200k_ToolDefinitionsHighRatio(t *testing.T) {
+	tools := makeMCPTools(30, 3_000)
+	turns := make([]turnConfig, 15)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: deep analysis with all tools", i),
+			toolCalls: []toolCall{
+				{name: "mcp_tool_0", responseSize: 20_000},
+				{name: "mcp_tool_15", responseSize: 10_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 4_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       3.5,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("brutal/200k-tool-defs-high-ratio: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k with tool definitions and 3.5x ratio should not overflow")
+	}
+}
+
+// ==========================================================================
+// INLINE DATA TESTS — verify that InlineData (images, PDFs, audio, video)
+// is counted in the heuristic.
+// ==========================================================================
+
+// TestStress_200k_InlineImages tests a conversation where the user sends
+// images (e.g. screenshots for visual debugging). Each image is ~100KB
+// base64, which is ~25k heuristic tokens per image.
+func TestStress_200k_InlineImages(t *testing.T) {
+	turns := make([]turnConfig, 15)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Here's a screenshot of the error, what do you think?", i),
+			inlineData:  []inlineAttachment{{mimeType: "image/png", size: 100_000}},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 2_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("200k/inline-images: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k with inline images should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with 100KB images per turn")
+	}
+}
+
+// TestStress_8k_InlineSmallImages tests inline images on a small context
+// window. Even a 10KB image (~2.5k heuristic tokens) fills a significant
+// portion of an 8k window.
+func TestStress_8k_InlineSmallImages(t *testing.T) {
+	turns := make([]turnConfig, 10)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: check this small diagram", i),
+			inlineData:  []inlineAttachment{{mimeType: "image/png", size: 10_000}},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 200,
+		modelName:        "custom-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("8k/inline-small-images: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k with small inline images should not overflow")
+	}
+}
+
+// TestBrutal_200k_LargeInlineDocuments tests large inline documents (e.g.
+// PDFs converted to base64). A 500KB PDF is ~125k heuristic tokens — a
+// single attachment can nearly fill a 200k window.
+func TestBrutal_200k_LargeInlineDocuments(t *testing.T) {
+	turns := []turnConfig{
+		{
+			userMessage: "Analyze this PDF report",
+			inlineData:  []inlineAttachment{{mimeType: "application/pdf", size: 500_000}},
+		},
+		{
+			userMessage: "Now compare with this second document",
+			inlineData:  []inlineAttachment{{mimeType: "application/pdf", size: 300_000}},
+		},
+		{
+			userMessage: "Summarize the key differences",
+		},
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 2_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/200k-large-inline-docs: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k with large inline PDFs should not overflow")
+	}
+}
+
+// TestBrutal_200k_MultipleInlinePerTurn tests turns with multiple inline
+// attachments — simulating a user pasting several screenshots at once.
+func TestBrutal_200k_MultipleInlinePerTurn(t *testing.T) {
+	turns := make([]turnConfig, 8)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Here are 3 screenshots from different pages", i),
+			inlineData: []inlineAttachment{
+				{mimeType: "image/png", size: 80_000},
+				{mimeType: "image/jpeg", size: 60_000},
+				{mimeType: "image/png", size: 90_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 2_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/200k-multi-inline: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k with multiple inline attachments per turn should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with ~230KB of inline data per turn")
+	}
+}
+
+// ==========================================================================
+// COMBINED: TOOL DEFINITIONS + INLINE DATA + TOOL RESPONSES
+// ==========================================================================
+
+// TestBrutal_200k_ToolDefsAndInlineImages tests the production scenario that
+// caused the original bug: an agent with tool definitions sending inline
+// images (e.g. a Telegram bot with MCP tools where users paste screenshots).
+// All three blind spots are exercised simultaneously.
+func TestBrutal_200k_ToolDefsAndInlineImages(t *testing.T) {
+	tools := makeMCPTools(15, 1_500)
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		tc := turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: look at this and use the tools to fix it", i),
+			toolCalls: []toolCall{
+				{name: "mcp_tool_0", responseSize: 5_000},
+			},
+		}
+		if i%3 == 0 {
+			tc.inlineData = []inlineAttachment{{mimeType: "image/png", size: 50_000}}
+		}
+		turns[i] = tc
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 3_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.5,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("brutal/200k-tools-and-images: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k with tool definitions + inline images should not overflow")
+	}
+}
+
+// TestBrutal_200k_ToolDefsAndInlineNoUsageMetadata is the hardest variant:
+// tool definitions + inline data + no UsageMetadata. The heuristic must
+// handle everything without calibration.
+func TestBrutal_200k_ToolDefsAndInlineNoUsageMetadata(t *testing.T) {
+	tools := makeMCPTools(10, 1_200)
+	turns := make([]turnConfig, 15)
+	for i := range turns {
+		tc := turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: analyze this image with the tools", i),
+			toolCalls:   []toolCall{{name: "mcp_tool_0", responseSize: 3_000}},
+		}
+		if i%2 == 0 {
+			tc.inlineData = []inlineAttachment{{mimeType: "image/jpeg", size: 30_000}}
+		}
+		turns[i] = tc
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 2_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: false,
+		tokenRatio:       2.0,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("brutal/200k-tools-inline-no-usage: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k with tool definitions + inline + no usage should not overflow")
+	}
+}
+
+// TestBrutal_8k_ToolDefsAndInlineCombined tests the absolute worst case on
+// a small window: tool schemas + inline data + tool responses + no usage
+// metadata. Every blind spot exercised at once on an 8k window.
+func TestBrutal_8k_ToolDefsAndInlineCombined(t *testing.T) {
+	tools := makeMCPTools(5, 600)
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		tc := turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: fix this", i),
+			toolCalls:   []toolCall{{name: "mcp_tool_0", responseSize: 800}},
+		}
+		if i%4 == 0 {
+			tc.inlineData = []inlineAttachment{{mimeType: "image/png", size: 5_000}}
+		}
+		turns[i] = tc
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 300,
+		modelName:        "custom-model",
+		hasUsageMetadata: false,
+		tokenRatio:       2.0,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("brutal/8k-all-blind-spots: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k with all blind spots combined should not overflow")
+	}
+}
+
+// ==========================================================================
+// REAL-WORLD USE CASE TESTS — production patterns from singleshot tests
+// ported to the multi-turn simulator for full ADK flow validation.
+//
+// These replicate the exact tool patterns from kubeAgentConversation,
+// mixedConversation, buildCodingAgentConversation, and pureToolStorm
+// but exercise them across many turns with compaction, calibration,
+// and re-compaction.
+// ==========================================================================
+
+// --- Kubernetes Agent Pattern ---
+// Each turn: user asks → model calls kubectl_get_pods (huge JSON) →
+// kubectl_describe_pod (huge text) → kubectl_get_logs (huge text) → model responds.
+// Matches kubeAgentConversation from singleshot tests.
+
+func TestStress_200k_KubeAgent(t *testing.T) {
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Check the status of pods in the production namespace and investigate any failures", i),
+			toolCalls: []toolCall{
+				{name: "kubectl_get_pods", responseSize: 15_000},
+				{name: "kubectl_describe_pod", responseSize: 10_000},
+				{name: "kubectl_get_logs", responseSize: 25_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 5_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.5,
+	}, turns)
+
+	t.Logf("200k/kube-agent: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k kube agent should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with 50k of kubectl output per turn")
+	}
+}
+
+func TestStress_8k_KubeAgent(t *testing.T) {
+	turns := make([]turnConfig, 10)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Get pod status", i),
+			toolCalls: []toolCall{
+				{name: "kubectl_get_pods", responseSize: 5_000},
+				{name: "kubectl_describe_pod", responseSize: 3_000},
+				{name: "kubectl_get_logs", responseSize: 8_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 500,
+		modelName:        "small-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("8k/kube-agent: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k kube agent should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with 16k of kubectl output per turn in 8k window")
+	}
+}
+
+func TestBrutal_200k_KubeAgent_30Rounds(t *testing.T) {
+	turns := make([]turnConfig, 30)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Deep investigation - check pods, describe failures, get full logs from all containers", i),
+			toolCalls: []toolCall{
+				{name: "kubectl_get_pods", responseSize: 20_000},
+				{name: "kubectl_describe_pod", responseSize: 15_000},
+				{name: "kubectl_get_logs", responseSize: 40_000},
+			},
+			responseSize: 500,
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 5_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.5,
+	}, turns)
+
+	t.Logf("brutal/200k-kube-30rounds: turns=%d compactions=%d maxTokens=%d overflowed=%v looped=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed, r.loopDetected)
+	if r.overflowed {
+		t.Error("200k kube agent 30 rounds should not overflow")
+	}
+	if r.loopDetected {
+		t.Error("compaction loop detected")
+	}
+}
+
+// --- Mixed Debugging Session Pattern ---
+// Interleaved text, small HTTP health checks, big Prometheus queries, SQL queries.
+// Matches mixedConversation from singleshot tests.
+
+func TestStress_200k_MixedDebugSession(t *testing.T) {
+	turns := make([]turnConfig, 25)
+	for i := range turns {
+		var tools []toolCall
+		switch {
+		case i%7 == 0:
+			tools = []toolCall{
+				{name: "prometheus_query", responseSize: 20_000},
+				{name: "sql_query", responseSize: 15_000},
+			}
+		case i%4 == 0:
+			tools = []toolCall{
+				{name: "http_get_health", responseSize: 500},
+			}
+		case i%3 == 0:
+			tools = []toolCall{
+				{name: "grep_logs", responseSize: 8_000},
+			}
+		}
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: The API is returning 500 errors intermittently. Let me check the metrics and database state.", i),
+			toolCalls:   tools,
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 3_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.2,
+	}, turns)
+
+	t.Logf("200k/mixed-debug: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k mixed debug session should not overflow")
+	}
+}
+
+func TestStress_8k_MixedDebugSession(t *testing.T) {
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		var tools []toolCall
+		switch {
+		case i%5 == 0:
+			tools = []toolCall{
+				{name: "prometheus_query", responseSize: 3_000},
+				{name: "sql_query", responseSize: 2_000},
+			}
+		case i%3 == 0:
+			tools = []toolCall{
+				{name: "http_get_health", responseSize: 200},
+			}
+		}
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Check the error rate from Prometheus and verify the DB connection pool", i),
+			toolCalls:   tools,
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 500,
+		modelName:        "small-model",
+		hasUsageMetadata: true,
+		tokenRatio:       1.8,
+	}, turns)
+
+	t.Logf("8k/mixed-debug: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k mixed debug session should not overflow")
+	}
+}
+
+func TestBrutal_200k_MixedDebugSession_LongInvestigation(t *testing.T) {
+	turns := make([]turnConfig, 50)
+	for i := range turns {
+		var tools []toolCall
+		switch {
+		case i%10 == 0:
+			tools = []toolCall{
+				{name: "prometheus_query", responseSize: 30_000},
+				{name: "grafana_dashboard", responseSize: 10_000},
+			}
+		case i%6 == 0:
+			tools = []toolCall{
+				{name: "sql_query", responseSize: 20_000},
+			}
+		case i%4 == 0:
+			tools = []toolCall{
+				{name: "http_get", responseSize: 2_000},
+				{name: "curl_endpoint", responseSize: 1_500},
+			}
+		case i%3 == 0:
+			tools = []toolCall{
+				{name: "grep_logs", responseSize: 5_000},
+			}
+		}
+		turns[i] = turnConfig{
+			userMessage:  fmt.Sprintf("Turn %d: Continue investigating the cascading failure across services", i),
+			toolCalls:    tools,
+			responseSize: 300,
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 5_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.3,
+	}, turns)
+
+	t.Logf("brutal/200k-mixed-debug-long: turns=%d compactions=%d maxTokens=%d overflowed=%v looped=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed, r.loopDetected)
+	if r.overflowed {
+		t.Error("200k mixed debug long investigation should not overflow")
+	}
+	if r.loopDetected {
+		t.Error("compaction loop detected")
+	}
+}
+
+// --- Pure Tool Storm Pattern ---
+// Nothing but tool calls with minimal/no user text between them.
+// Matches pureToolStorm from singleshot tests.
+
+func TestStress_200k_PureToolStorm(t *testing.T) {
+	turns := make([]turnConfig, 30)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: go", i),
+			toolCalls: []toolCall{
+				{name: fmt.Sprintf("tool_%d_a", i), responseSize: 5_000},
+				{name: fmt.Sprintf("tool_%d_b", i), responseSize: 5_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 1_000,
+		modelName:        "claude-sonnet",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("200k/pure-tool-storm: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k pure tool storm should not overflow")
+	}
+}
+
+func TestStress_8k_PureToolStorm(t *testing.T) {
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: "go",
+			toolCalls: []toolCall{
+				{name: "execute", responseSize: 2_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 200,
+		modelName:        "small-model",
+		hasUsageMetadata: true,
+		tokenRatio:       1.8,
+	}, turns)
+
+	t.Logf("8k/pure-tool-storm: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k pure tool storm should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with 2k tool responses per turn in 8k window")
+	}
+}
+
+func TestBrutal_200k_PureToolStorm_HugeResponses(t *testing.T) {
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: "next",
+			toolCalls: []toolCall{
+				{name: "fetch_all", responseSize: 50_000},
+				{name: "process", responseSize: 20_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 1_000,
+		modelName:        "claude-sonnet",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/200k-pure-storm-huge: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k pure tool storm with huge responses should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with 70k of tool output per turn")
+	}
+}
+
+func TestBrutal_8k_PureToolStorm_50Turns(t *testing.T) {
+	turns := make([]turnConfig, 50)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: "run",
+			toolCalls: []toolCall{
+				{name: "exec", responseSize: 3_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 200,
+		modelName:        "small-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/8k-pure-storm-50: turns=%d compactions=%d maxTokens=%d overflowed=%v looped=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed, r.loopDetected)
+	if r.overflowed {
+		t.Error("8k pure tool storm 50 turns should not overflow")
+	}
+	if r.compactions < 3 {
+		t.Errorf("expected at least 3 compactions in 50-turn pure tool storm, got %d", r.compactions)
+	}
+}
+
+// --- Coding Agent Pattern ---
+// Each turn: user asks → model thinks (text response) → reads file → analyzes →
+// edits file → runs tests → model summarizes. Sequential tool chains.
+// Matches buildCodingAgentConversation from singleshot tests.
+
+func TestStress_200k_CodingAgent(t *testing.T) {
+	turns := make([]turnConfig, 15)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage:  fmt.Sprintf("Turn %d: Fix the bug in the authentication middleware and make sure tests pass", i),
+			sequential:   true,
+			responseSize: 400,
+			toolCalls: []toolCall{
+				{name: "read_file", responseSize: 8_000},
+				{name: "edit_file", responseSize: 2_000},
+				{name: "run_tests", responseSize: 12_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 8_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.5,
+	}, turns)
+
+	t.Logf("200k/coding-agent: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k coding agent should not overflow")
+	}
+}
+
+func TestStress_8k_CodingAgent(t *testing.T) {
+	turns := make([]turnConfig, 10)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage:  fmt.Sprintf("Turn %d: Fix the next issue", i),
+			sequential:   true,
+			responseSize: 200,
+			toolCalls: []toolCall{
+				{name: "read_file", responseSize: 3_000},
+				{name: "edit_file", responseSize: 1_000},
+				{name: "run_tests", responseSize: 4_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 800,
+		modelName:        "small-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("8k/coding-agent: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k coding agent should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with sequential tool chains in 8k window")
+	}
+}
+
+func TestBrutal_200k_CodingAgent_DeepRefactor(t *testing.T) {
+	turns := make([]turnConfig, 25)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage:  fmt.Sprintf("Turn %d: Refactor the service layer to use dependency injection and update all tests", i),
+			sequential:   true,
+			responseSize: 600,
+			toolCalls: []toolCall{
+				{name: "read_file", responseSize: 15_000},
+				{name: "grep_codebase", responseSize: 5_000},
+				{name: "edit_file", responseSize: 3_000},
+				{name: "read_file", responseSize: 10_000},
+				{name: "edit_file", responseSize: 4_000},
+				{name: "run_tests", responseSize: 20_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 10_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.5,
+	}, turns)
+
+	t.Logf("brutal/200k-coding-deep-refactor: turns=%d compactions=%d maxTokens=%d overflowed=%v looped=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed, r.loopDetected)
+	if r.overflowed {
+		t.Error("200k coding agent deep refactor should not overflow")
+	}
+	if r.loopDetected {
+		t.Error("compaction loop detected")
+	}
+}
+
+func TestBrutal_8k_CodingAgent_NoUsageMetadata(t *testing.T) {
+	turns := make([]turnConfig, 15)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: fix the next test failure", i),
+			sequential:  true,
+			toolCalls: []toolCall{
+				{name: "read_file", responseSize: 2_000},
+				{name: "edit_file", responseSize: 800},
+				{name: "run_tests", responseSize: 3_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 500,
+		modelName:        "custom-model",
+		hasUsageMetadata: false,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/8k-coding-no-usage: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k coding agent without usage metadata should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with sequential chains in 8k")
+	}
+}
+
+// --- Tiny Context Window (4k) ---
+// Tests the absolute smallest realistic context windows where even a single
+// tool response may exceed the threshold.
+
+func TestStress_4k_NormalConversation(t *testing.T) {
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: longMessage(i, 600),
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 300,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       1.8,
+	}, turns)
+
+	t.Logf("4k/normal: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("4k normal conversation should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions in 4k window with 20 turns of long messages")
+	}
+}
+
+func TestStress_4k_WithSmallTools(t *testing.T) {
+	turns := make([]turnConfig, 10)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: longMessage(i, 200),
+			toolCalls:   []toolCall{{name: "search", responseSize: 500}},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 200,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       1.8,
+	}, turns)
+
+	t.Logf("4k/small-tools: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("4k with small tools should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions in 4k window")
+	}
+}
+
+func TestBrutal_4k_ToolResponseExceedsWindow(t *testing.T) {
+	turns := []turnConfig{
+		{
+			userMessage: "Get the full output",
+			toolCalls:   []toolCall{{name: "read_all", responseSize: 20_000}},
+		},
+		{userMessage: "Summarize what you found"},
+		{userMessage: "Any issues?"},
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 200,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/4k-tool-exceeds: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.compactions == 0 {
+		t.Error("20k tool response in 4k window must trigger compaction")
+	}
+}
+
+func TestBrutal_4k_EveryTurnExceedsWindow(t *testing.T) {
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: longMessage(i, 1_000),
+			toolCalls:   []toolCall{{name: "tool", responseSize: 8_000}},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 200,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/4k-every-turn-exceeds: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.compactions < 10 {
+		t.Errorf("expected heavy compaction activity in 4k with oversized turns, got %d", r.compactions)
+	}
+}
+
+func TestBrutal_4k_KubeAgent(t *testing.T) {
+	turns := make([]turnConfig, 10)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: check pods", i),
+			toolCalls: []toolCall{
+				{name: "kubectl_get_pods", responseSize: 3_000},
+				{name: "kubectl_describe", responseSize: 2_000},
+				{name: "kubectl_logs", responseSize: 5_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 300,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/4k-kube: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.compactions == 0 {
+		t.Error("expected heavy compaction with kube pattern in 4k window")
+	}
+}
+
+func TestBrutal_4k_CodingAgent(t *testing.T) {
+	turns := make([]turnConfig, 10)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: fix it", i),
+			sequential:  true,
+			toolCalls: []toolCall{
+				{name: "read_file", responseSize: 2_000},
+				{name: "edit_file", responseSize: 500},
+				{name: "run_tests", responseSize: 3_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 300,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/4k-coding: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.compactions == 0 {
+		t.Error("expected compactions with coding pattern in 4k window")
+	}
+}
+
+func TestBrutal_4k_MixedDebug(t *testing.T) {
+	turns := make([]turnConfig, 15)
+	for i := range turns {
+		var tools []toolCall
+		switch {
+		case i%5 == 0:
+			tools = []toolCall{
+				{name: "prometheus_query", responseSize: 3_000},
+				{name: "sql_query", responseSize: 2_000},
+			}
+		case i%3 == 0:
+			tools = []toolCall{
+				{name: "http_get", responseSize: 200},
+			}
+		}
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: debug the issue", i),
+			toolCalls:   tools,
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 200,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/4k-mixed-debug: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("4k mixed debug should not overflow")
+	}
+}
+
+func TestBrutal_4k_PureToolStorm(t *testing.T) {
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: "go",
+			toolCalls:   []toolCall{{name: "exec", responseSize: 2_000}},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 100,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/4k-pure-storm: turns=%d compactions=%d maxTokens=%d overflowed=%v looped=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed, r.loopDetected)
+	if r.compactions < 3 {
+		t.Errorf("expected at least 3 compactions in 4k pure tool storm, got %d", r.compactions)
+	}
+}
+
+// --- 1M Context Window ---
+// Tests for very large context windows (e.g., Gemini 1.5 Pro).
+
+func TestStress_1M_NormalConversation(t *testing.T) {
+	turns := make([]turnConfig, 50)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Continue the comprehensive analysis of the distributed system architecture across all microservices and their interactions", i),
+			toolCalls: []toolCall{
+				{name: "fetch", responseSize: 10_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    1_000_000,
+		systemPromptSize: 10_000,
+		modelName:        "gemini-pro",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("1M/normal: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("1M normal conversation should not overflow")
+	}
+}
+
+func TestStress_1M_HeavyTools(t *testing.T) {
+	turns := make([]turnConfig, 30)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Analyze the full codebase", i),
+			toolCalls: []toolCall{
+				{name: "read_file", responseSize: 50_000},
+				{name: "grep_codebase", responseSize: 20_000},
+				{name: "run_tests", responseSize: 30_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    1_000_000,
+		systemPromptSize: 10_000,
+		modelName:        "gemini-pro",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("1M/heavy-tools: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("1M with heavy tools should not overflow")
+	}
+}
+
+func TestBrutal_1M_KubeAgent_ExtremeLongevity(t *testing.T) {
+	turns := make([]turnConfig, 100)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Check the full cluster state including all namespaces", i),
+			toolCalls: []toolCall{
+				{name: "kubectl_get_pods", responseSize: 30_000},
+				{name: "kubectl_describe", responseSize: 20_000},
+				{name: "kubectl_logs", responseSize: 50_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    1_000_000,
+		systemPromptSize: 10_000,
+		modelName:        "gemini-pro",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/1M-kube-100turns: turns=%d compactions=%d maxTokens=%d overflowed=%v looped=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed, r.loopDetected)
+	if r.overflowed {
+		t.Error("1M kube agent 100 turns should not overflow")
+	}
+	if r.loopDetected {
+		t.Error("compaction loop detected in 1M session")
+	}
+}
+
+func TestBrutal_1M_PureToolStorm_MonsterResponses(t *testing.T) {
+	turns := make([]turnConfig, 50)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: "next batch",
+			toolCalls: []toolCall{
+				{name: "fetch_dataset", responseSize: 100_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    1_000_000,
+		systemPromptSize: 5_000,
+		modelName:        "gemini-pro",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/1M-monster-storm: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("1M with 100k tool responses should not overflow")
+	}
+}
+
+func TestBrutal_1M_NoUsageMetadata(t *testing.T) {
+	turns := make([]turnConfig, 40)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Continue the deep investigation across all systems", i),
+			toolCalls: []toolCall{
+				{name: "fetch", responseSize: 30_000},
+				{name: "analyze", responseSize: 15_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    1_000_000,
+		systemPromptSize: 5_000,
+		modelName:        "custom-1m-model",
+		hasUsageMetadata: false,
+		tokenRatio:       2.5,
+	}, turns)
+
+	t.Logf("brutal/1M-no-usage: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("1M with no usage metadata should not overflow")
+	}
+}
+
+// --- Production Magec Scenario ---
+// Simulates the exact production setup that triggered the original bug:
+// Telegram bot with MCP tools, users sending screenshots, tool definitions
+// attached, structured JSON responses, high token ratio.
+
+func TestBrutal_200k_MagecProductionScenario(t *testing.T) {
+	tools := makeMCPTools(25, 2_500)
+	turns := make([]turnConfig, 30)
+	for i := range turns {
+		tc := turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: The deployment pipeline is failing. Check the CI/CD status and fix the configuration.", i),
+			toolCalls: []toolCall{
+				{name: "mcp_tool_0", responseSize: 8_000},
+				{name: "mcp_tool_5", responseSize: 5_000},
+			},
+			responseSize: 400,
+		}
+		if i%4 == 0 {
+			tc.inlineData = []inlineAttachment{{mimeType: "image/png", size: 80_000}}
+		}
+		if i%6 == 0 {
+			tc.toolCalls = append(tc.toolCalls,
+				toolCall{name: "mcp_tool_10", responseSize: 15_000},
+				toolCall{name: "mcp_tool_15", responseSize: 10_000},
+			)
+		}
+		turns[i] = tc
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 8_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.5,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("brutal/200k-magec-production: turns=%d compactions=%d maxTokens=%d overflowed=%v looped=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed, r.loopDetected)
+	if r.overflowed {
+		t.Error("magec production scenario should not overflow")
+	}
+	if r.loopDetected {
+		t.Error("compaction loop detected in magec production scenario")
+	}
+}
+
+func TestBrutal_200k_MagecProductionScenario_NoUsageMetadata(t *testing.T) {
+	tools := makeMCPTools(20, 2_000)
+	turns := make([]turnConfig, 20)
+	for i := range turns {
+		tc := turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: Investigate and fix the issue", i),
+			toolCalls: []toolCall{
+				{name: "mcp_tool_0", responseSize: 5_000},
+			},
+		}
+		if i%3 == 0 {
+			tc.inlineData = []inlineAttachment{{mimeType: "image/png", size: 50_000}}
+		}
+		turns[i] = tc
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 5_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: false,
+		tokenRatio:       2.5,
+		tools:            tools,
+	}, turns)
+
+	t.Logf("brutal/200k-magec-no-usage: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("magec production scenario without usage metadata should not overflow")
+	}
+}
+
+// --- Sequential Tool Chains with Escalating Sizes ---
+// Each turn has sequential tool calls where each step produces progressively
+// larger output. Tests that compaction handles growing context within a single turn.
+
+func TestBrutal_200k_SequentialEscalatingSizes(t *testing.T) {
+	turns := make([]turnConfig, 10)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: run the full analysis pipeline", i),
+			sequential:  true,
+			toolCalls: []toolCall{
+				{name: "list_files", responseSize: 2_000},
+				{name: "read_small_file", responseSize: 5_000},
+				{name: "read_large_file", responseSize: 20_000},
+				{name: "analyze_data", responseSize: 40_000},
+				{name: "generate_report", responseSize: 60_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    200_000,
+		systemPromptSize: 3_000,
+		modelName:        "claude-sonnet-4-6",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/200k-seq-escalating: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("200k sequential escalating sizes should not overflow")
+	}
+}
+
+func TestBrutal_8k_SequentialEscalatingSizes(t *testing.T) {
+	turns := make([]turnConfig, 10)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: pipeline", i),
+			sequential:  true,
+			toolCalls: []toolCall{
+				{name: "step1", responseSize: 500},
+				{name: "step2", responseSize: 1_500},
+				{name: "step3", responseSize: 3_000},
+				{name: "step4", responseSize: 5_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    8_000,
+		systemPromptSize: 300,
+		modelName:        "small-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/8k-seq-escalating: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.overflowed {
+		t.Error("8k sequential escalating sizes should not overflow")
+	}
+	if r.compactions == 0 {
+		t.Error("expected compactions with escalating tool responses in 8k")
+	}
+}
+
+func TestBrutal_4k_SequentialEscalatingSizes(t *testing.T) {
+	turns := make([]turnConfig, 8)
+	for i := range turns {
+		turns[i] = turnConfig{
+			userMessage: fmt.Sprintf("Turn %d: go", i),
+			sequential:  true,
+			toolCalls: []toolCall{
+				{name: "step1", responseSize: 300},
+				{name: "step2", responseSize: 800},
+				{name: "step3", responseSize: 2_000},
+			},
+		}
+	}
+
+	r := simulateSession(t, sessionConfig{
+		contextWindow:    4_000,
+		systemPromptSize: 200,
+		modelName:        "tiny-model",
+		hasUsageMetadata: true,
+		tokenRatio:       2.0,
+	}, turns)
+
+	t.Logf("brutal/4k-seq-escalating: turns=%d compactions=%d maxTokens=%d overflowed=%v",
+		r.turns, r.compactions, r.maxTokensSeen, r.overflowed)
+	if r.compactions == 0 {
+		t.Error("expected compactions with escalating sequential tools in 4k")
 	}
 }

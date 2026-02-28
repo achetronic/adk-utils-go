@@ -113,7 +113,7 @@ return max(real, calibrated)
 - `correction` translates heuristic tokens into real tokens using the last known ratio.
 - `max(real, calibrated)` ensures we never undercount — if the request didn't grow, `real` dominates; if it grew, `calibrated` dominates.
 - The correction factor is floored at 1.0 to prevent the calibrated value from being smaller than the raw heuristic.
-- If no real tokens exist (first turn), a conservative default factor of 2.0 is applied.
+- If no real tokens exist (first turn), a conservative default factor of 2.5 is applied.
 
 ### Proof
 
@@ -144,7 +144,7 @@ Compaction fires correctly at 300k, well above the 180k threshold.
 ```
 BeforeModelCallback (step N)
 ├── tokenCount(ctx, req)
-│   ├── currentHeuristic = estimateTokens(req)      ← on the FULL current request
+│   ├── currentHeuristic = estimateTokens(req)      ← contents + system instruction + tool definitions + inline data
 │   ├── real = loadRealTokens(ctx)                   ← from step N-1's AfterModel
 │   ├── lastHeuristic = loadLastHeuristic(ctx)       ← from step N-1's BeforeModel
 │   ├── correction = max(1.0, real / lastHeuristic)
@@ -176,11 +176,14 @@ Tool execution → results appended to session → loop back to step N+1
 | Calibrated heuristic instead of raw `max(real, heuristic)` | Raw heuristic underestimates by 2-3× for structured content. The correction factor from the previous call bridges this gap. |
 | Correction factor floored at 1.0 | Prevents the heuristic from being *reduced* when real tokens are lower (e.g., after compaction). |
 | Correction factor capped at 5.0 | Prevents a single anomalous turn (JSON-heavy tool schemas) from producing a disproportionate correction that persists. |
-| Default factor 1.5 for first turn | Conservative — triggers compaction slightly early rather than risking overflow on the very first turn without calibration data. |
+| Default factor 2.5 for first turn | Conservative — triggers compaction slightly early rather than risking overflow on the very first turn without calibration data. Accounts for tool definitions and structured content overhead not fully captured by len/4. |
 | Continuation message includes original user request | Prevents the agent from asking the user to repeat themselves after compaction. |
 | Todo preservation in summary prompt | Maintains task tracking state across compaction boundaries. |
 | Truncate conversation before summarization | Prevents the summarization prompt itself from exceeding the summarizer LLM's context window. |
 | Fallback summary on LLM failure | If summarization fails, a mechanical summary (first 200 chars of each message) is used instead of passing through the bloated request. |
+| Count tool definitions in heuristic | Tool declarations (name, description, JSON schemas) are sent with every request. Without counting them, the heuristic can underestimate by 8x+ for tool-heavy agents. |
+| Count InlineData in heuristic | `InlineData` is a generic `*genai.Blob` (images, PDFs, audio, video). A single base64-encoded image can be tens of thousands of tokens invisible to the old heuristic. |
+| Buffer boundary `>=` not `>` | 200k windows should use the fixed 20k buffer. `>` excluded 200k exactly, applying 20% (40k) instead — an unintended 20k threshold reduction. |
 
 ---
 
