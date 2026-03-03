@@ -77,6 +77,19 @@ agent, _ := llmagent.New(llmagent.Config{
 })
 ```
 
+#### Extended Thinking
+
+Claude can generate an internal reasoning chain before producing its final response. Thinking tokens are **output tokens** — Claude writes the reasoning as text (it just isn't shown to the user). Set `ThinkingBudgetTokens` to reserve a portion of the output budget for this reasoning. The remaining tokens (`MaxOutputTokens - ThinkingBudgetTokens`) are available for the final response.
+
+```go
+llmModel := genaianthropic.New(genaianthropic.Config{
+    APIKey:               os.Getenv("ANTHROPIC_API_KEY"),
+    ModelName:            "claude-sonnet-4-5-20250929",
+    MaxOutputTokens:      16000,
+    ThinkingBudgetTokens: 10000, // must be >= 1024 and < MaxOutputTokens
+})
+```
+
 ### Custom HTTP Headers
 
 Both clients support custom HTTP headers via `HTTPOptions`, useful for beta features, auth proxies, or provider-specific flags:
@@ -103,7 +116,8 @@ Both clients support:
 - System instructions
 - Tool/function calling
 - Image inputs (base64)
-- Temperature, TopP, MaxTokens, StopSequences
+- Temperature, TopP, MaxOutputTokens, StopSequences
+- Extended thinking (`ThinkingBudgetTokens`)
 - Usage metadata
 - Custom HTTP headers (multi-value)
 

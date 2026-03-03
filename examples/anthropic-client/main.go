@@ -17,8 +17,11 @@
 // This example shows how to use the Anthropic client with ADK.
 //
 // Environment variables:
-//   ANTHROPIC_API_KEY - Anthropic API key (required)
-//   MODEL_NAME        - Model to use (default: claude-sonnet-4-5-20250929)
+//
+//	ANTHROPIC_API_KEY        - Anthropic API key (required)
+//	MODEL_NAME               - Model to use (default: claude-sonnet-4-5-20250929)
+//	MAX_OUTPUT_TOKENS        - Max output tokens (default: 4096)
+//	THINKING_BUDGET_TOKENS   - Output tokens reserved for extended thinking; 0 disables it (default: 0)
 
 package main
 
@@ -27,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -47,8 +51,10 @@ func main() {
 	// 1. Create the Anthropic client
 	//    This is all you need to switch from Gemini to Anthropic
 	llmModel := genaianthropic.New(genaianthropic.Config{
-		APIKey:    os.Getenv("ANTHROPIC_API_KEY"),
-		ModelName: getEnvOrDefault("MODEL_NAME", "claude-sonnet-4-5-20250929"),
+		APIKey:               os.Getenv("ANTHROPIC_API_KEY"),
+		ModelName:            getEnvOrDefault("MODEL_NAME", "claude-sonnet-4-5-20250929"),
+		MaxOutputTokens:      getEnvInt("MAX_OUTPUT_TOKENS", 0),
+		ThinkingBudgetTokens: getEnvInt("THINKING_BUDGET_TOKENS", 0),
 	})
 
 	// 2. Create an agent using the Anthropic model
@@ -102,6 +108,15 @@ func main() {
 func getEnvOrDefault(key, defaultValue string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return defaultValue
 }

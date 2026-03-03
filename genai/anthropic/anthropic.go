@@ -44,8 +44,10 @@ var anthropicToolIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // Model implements model.LLM using the official Anthropic Go SDK.
 type Model struct {
-	client    *anthropic.Client
-	modelName string
+	client               *anthropic.Client
+	modelName            string
+	maxOutputTokens      int
+	thinkingBudgetTokens int
 }
 
 // HTTPOptions holds optional HTTP-level configuration for the Anthropic client.
@@ -61,6 +63,17 @@ type Config struct {
 	BaseURL string
 	// ModelName is the model to use (e.g., "claude-sonnet-4-5-20250929").
 	ModelName string
+	// MaxOutputTokens sets the default maximum number of tokens Claude can generate in its response.
+	// This is an output-only limit and does not affect the input/context window.
+	// If zero, defaults to 4096.
+	MaxOutputTokens int
+	// ThinkingBudgetTokens enables extended thinking and sets how many output tokens Claude
+	// can spend generating its internal reasoning before producing the final response.
+	// Thinking tokens are output tokens — Claude generates the reasoning as text, it just
+	// isn't shown to the user (or is returned in a separate block).
+	// Must be >= 1024 and strictly less than MaxOutputTokens.
+	// If zero, extended thinking is disabled.
+	ThinkingBudgetTokens int
 	// HTTPOptions holds optional HTTP-level overrides (e.g. extra headers).
 	HTTPOptions HTTPOptions
 }
@@ -84,8 +97,10 @@ func New(cfg Config) *Model {
 	client := anthropic.NewClient(opts...)
 
 	return &Model{
-		client:    &client,
-		modelName: cfg.ModelName,
+		client:               &client,
+		modelName:            cfg.ModelName,
+		maxOutputTokens:      cfg.MaxOutputTokens,
+		thinkingBudgetTokens: cfg.ThinkingBudgetTokens,
 	}
 }
 
@@ -189,6 +204,9 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewParams, error) {
 	// Default max tokens (required by Anthropic API)
 	maxTokens := int64(4096)
+	if m.maxOutputTokens > 0 {
+		maxTokens = int64(m.maxOutputTokens)
+	}
 	if req.Config != nil && req.Config.MaxOutputTokens > 0 {
 		maxTokens = int64(req.Config.MaxOutputTokens)
 	}
@@ -196,6 +214,14 @@ func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewP
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(m.modelName),
 		MaxTokens: maxTokens,
+	}
+
+	if m.thinkingBudgetTokens > 0 {
+		params.Thinking = anthropic.ThinkingConfigParamUnion{
+			OfEnabled: &anthropic.ThinkingConfigEnabledParam{
+				BudgetTokens: int64(m.thinkingBudgetTokens),
+			},
+		}
 	}
 
 	// Add system instruction if present
