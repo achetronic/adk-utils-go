@@ -8,7 +8,7 @@ A Go library providing utilities for Google's Agent Development Kit (ADK). This 
 
 **Module**: `github.com/achetronic/adk-utils-go` (see `go.mod`)  
 **Go Version**: 1.24.9+ (toolchain 1.25.5)  
-**ADK Version**: v0.4.0
+**ADK Version**: v0.5.0
 
 ### Key Dependencies
 
@@ -85,16 +85,20 @@ adk-utils-go/
 │   └── memory/
 │       └── toolset.go           # Memory toolset for agent tools
 ├── plugin/
-│   └── contextguard/
-│       ├── contextguard.go                        # Public API: New(), Add(), PluginConfig(), BeforeModel/AfterModel callbacks
-│       ├── contextguard_unit_test.go               # 93 unit tests covering all functions + timing gap proofs
-│       ├── compaction_strategy_multiturn_test.go   # 91 multi-turn session simulations (4k/8k/200k/1M, kube/coding/debug/storm patterns, tool defs, inline data, ratios, loops)
-│       ├── compaction_strategy_singleshot_test.go  # Single-shot Compact() tests: kube-agent, mixed-debug, tool-storm, timing gap
-│       ├── model_registry.go                       # ModelRegistry interface (ContextWindow, DefaultMaxTokens)
-│       ├── model_registry_crush.go                 # CrushRegistry: catwalk embedded DB, 564 models, zero network
-│       ├── compaction_utils.go                     # Internal helpers: state, summarization, tokens (contents + system + tools + inline data), calibration, splitting, continuation, todos, truncation
-│       ├── compaction_strategy_threshold.go        # Token-threshold strategy (Crush-style full summary + hardening)
-│       └── compaction_strategy_sliding_window.go   # Sliding-window strategy (turn-count, with recent tail + retry)
+│   ├── contextguard/
+│   │   ├── contextguard.go                        # Public API: New(), Add(), PluginConfig(), BeforeModel/AfterModel callbacks
+│   │   ├── contextguard_unit_test.go               # 93 unit tests covering all functions + timing gap proofs
+│   │   ├── compaction_strategy_multiturn_test.go   # 91 multi-turn session simulations (4k/8k/200k/1M, kube/coding/debug/storm patterns, tool defs, inline data, ratios, loops)
+│   │   ├── compaction_strategy_singleshot_test.go  # Single-shot Compact() tests: kube-agent, mixed-debug, tool-storm, timing gap
+│   │   ├── model_registry.go                       # ModelRegistry interface (ContextWindow, DefaultMaxTokens)
+│   │   ├── model_registry_crush.go                 # CrushRegistry: catwalk embedded DB, 564 models, zero network
+│   │   ├── compaction_utils.go                     # Internal helpers: state, summarization, tokens (contents + system + tools + inline data), calibration, splitting, continuation, todos, truncation
+│   │   ├── compaction_strategy_threshold.go        # Token-threshold strategy (Crush-style full summary + hardening)
+│   │   └── compaction_strategy_sliding_window.go   # Sliding-window strategy (turn-count, with recent tail + retry)
+│   └── langfuse/
+│       ├── langfuse.go      # Setup() API, spanEnricher (callbacks), enrichingExporter, enrichedSpan, helpers
+│       ├── types.go         # Config struct with yaml/json tags, IsEnabled()
+│       └── context.go       # Context helpers: WithUserID, WithTags, WithTraceMetadata, etc.
 ├── examples/
 │   ├── openai-client/main.go
 │   ├── anthropic-client/main.go
@@ -118,6 +122,7 @@ adk-utils-go/
 | `artifact/filesystem` | Filesystem-backed `artifact.Service` implementation |
 | `tools/memory` | ADK toolset providing `search_memory`, `save_to_memory`, `update_memory`, and `delete_memory` tools |
 | `plugin/contextguard` | ADK plugin for context window management (threshold + sliding window strategies) |
+| `plugin/langfuse` | ADK plugin for Langfuse observability via OTLP/HTTP (LLM request/response enrichment, token usage, cost tracking) |
 
 ---
 

@@ -12,6 +12,7 @@ This repository provides production-ready implementations for:
 - **Memory Tools**: Toolsets for agent-controlled memory operations
 - **Artifact Storage**: Filesystem-based artifact persistence with versioning
 - **Context Guard**: Automatic context window management with LLM-powered summarization
+- **Langfuse**: Observability plugin — traces every LLM call to [Langfuse](https://langfuse.com) with full prompt/response payloads and token usage
 
 ## Structure
 
@@ -28,7 +29,8 @@ This repository provides production-ready implementations for:
 ├── artifact/         # Artifact service implementations
 │   └── filesystem/   # Filesystem artifact service (versioned, user-scoped)
 ├── plugin/           # ADK plugin implementations
-│   └── contextguard/ # Context window management plugin + CrushRegistry
+│   ├── contextguard/ # Context window management plugin + CrushRegistry
+│   └── langfuse/     # Langfuse observability plugin (OTLP/HTTP traces)
 └── examples/         # Working examples
 ```
 
@@ -205,6 +207,68 @@ launcherCfg := &launcher.Config{
 
 Artifacts are stored at `{BasePath}/{appName}/{userID}/{sessionID}/{fileName}/{version}.json`. Filenames prefixed with `user:` are scoped to the user across all sessions, making them accessible from any conversation.
 
+## Langfuse Plugin
+
+Traces every agent invocation and LLM call to [Langfuse](https://langfuse.com) via OTLP/HTTP. Enriches `generate_content` spans with full request/response payloads and token usage so Langfuse can display costs, latency, and prompt/completion content.
+
+Supports all ADK agent topologies: single agents, sequential delegation, SequentialAgent, LoopAgent, and ParallelAgent.
+
+### Setup
+
+```go
+import "github.com/achetronic/adk-utils-go/plugin/langfuse"
+
+pluginCfg, shutdown, err := langfuse.Setup(&langfuse.Config{
+    PublicKey:   os.Getenv("LANGFUSE_PUBLIC_KEY"),
+    SecretKey:   os.Getenv("LANGFUSE_SECRET_KEY"),
+    Host:        "https://cloud.langfuse.com", // or self-hosted URL
+    Environment: "production",
+    ServiceName: "my-agent",
+})
+if err != nil { log.Fatal(err) }
+defer shutdown(context.Background())
+
+runnr, _ := runner.New(runner.Config{
+    Agent:        myAgent,
+    PluginConfig: pluginCfg,
+})
+```
+
+### Combining with ContextGuard
+
+```go
+langfuseCfg, shutdown, _ := langfuse.Setup(langfuseCfg)
+guardCfg := guard.PluginConfig()
+
+combined := runner.PluginConfig{
+    Plugins: append(langfuseCfg.Plugins, guardCfg.Plugins...),
+}
+```
+
+### Per-Request Context
+
+Inject per-request attributes via context (typically in HTTP middleware):
+
+```go
+ctx = langfuse.WithUserID(ctx, "user-123")
+ctx = langfuse.WithTags(ctx, []string{"beta", "internal"})
+ctx = langfuse.WithTraceName(ctx, "customer-support")
+ctx = langfuse.WithTraceMetadata(ctx, map[string]string{"tenant": "acme"})
+```
+
+### Config
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `PublicKey` | Yes | — | Langfuse project public key (Basic Auth user) |
+| `SecretKey` | Yes | — | Langfuse project secret key (Basic Auth pass) |
+| `Host` | No | `https://cloud.langfuse.com` | Langfuse server URL |
+| `Environment` | No | — | Deployment environment tag |
+| `Release` | No | — | Application version tag |
+| `ServiceName` | No | `langfuse-adk` | OTel `service.name` resource attribute |
+
+Use `cfg.IsEnabled()` to conditionally skip setup when credentials are absent.
+
 ## Context Guard Plugin
 
 Automatic context window management that prevents conversations from exceeding the LLM's token limit. It works as an ADK `BeforeModelCallback` plugin — before every LLM call, it checks whether the conversation is approaching the limit and summarizes older messages to make room.
@@ -340,7 +404,7 @@ go run ./examples/openai-client
 ## Requirements
 
 - Go 1.24+
-- [Google ADK](https://google.github.io/adk-docs/) v0.4.0+
+- [Google ADK](https://google.github.io/adk-docs/) v0.5.0+
 
 ## License
 
