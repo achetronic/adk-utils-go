@@ -91,13 +91,16 @@ func Setup(cfg *Config) (runner.PluginConfig, func(context.Context) error, error
 		host = defaultHost
 	}
 
-	exporter, err := otlptracehttp.New(context.Background(),
+	exporterOpts := []otlptracehttp.Option{
 		otlptracehttp.WithEndpointURL(fmt.Sprintf("%s/api/public/otel/v1/traces", host)),
 		otlptracehttp.WithHeaders(map[string]string{
 			"Authorization": "Basic " + auth,
 		}),
-		otlptracehttp.WithInsecure(),
-	)
+	}
+	if cfg.Insecure {
+		exporterOpts = append(exporterOpts, otlptracehttp.WithInsecure())
+	}
+	exporter, err := otlptracehttp.New(context.Background(), exporterOpts...)
 	if err != nil {
 		return runner.PluginConfig{}, nil, fmt.Errorf("langfuse: create OTLP exporter: %w", err)
 	}

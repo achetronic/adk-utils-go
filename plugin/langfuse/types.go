@@ -46,6 +46,12 @@ type Config struct {
 	// applications should set this to their own name. Defaults to
 	// "langfuse-adk" when empty.
 	ServiceName string `yaml:"serviceName,omitempty" json:"serviceName,omitempty"`
+
+	// Insecure disables TLS for the OTLP/HTTP exporter. Set to true only when
+	// connecting to a self-hosted Langfuse instance that does not serve HTTPS
+	// (e.g. plain-HTTP local development). The default (false) keeps TLS
+	// enabled, which is required for the public Langfuse Cloud endpoints.
+	Insecure bool `yaml:"insecure,omitempty" json:"insecure,omitempty"`
 }
 
 // IsEnabled reports whether the minimum required credentials (PublicKey and
