@@ -125,6 +125,31 @@ func (m *mockLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool
 	}
 }
 
+type countingMockLLM struct {
+	name      string
+	responses []string
+	calls     int
+}
+
+func (m *countingMockLLM) Name() string { return m.name }
+
+func (m *countingMockLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	idx := m.calls
+	if idx >= len(m.responses) {
+		idx = len(m.responses) - 1
+	}
+	resp := m.responses[idx]
+	m.calls++
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: resp}},
+			},
+		}, nil)
+	}
+}
+
 type mockRegistry struct {
 	contextWindows map[string]int
 	maxTokens      map[string]int
@@ -1969,5 +1994,111 @@ func TestThresholdStrategy_RealTokens_TriggersWhereHeuristicFails(t *testing.T) 
 
 	if !strings.Contains(req.Contents[0].Parts[0].Text, "compacted") {
 		t.Error("real token count should have triggered compaction where heuristic wouldn't")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Threshold retry loop (maxCompactionAttempts)
+// ---------------------------------------------------------------------------
+
+func TestThresholdStrategy_RetriesWhenSummaryTooLarge(t *testing.T) {
+	registry := &mockRegistry{
+		contextWindows: map[string]int{"tiny-model": 1_000},
+		maxTokens:      map[string]int{"tiny-model": 256},
+	}
+	buffer := computeBuffer(1_000)
+	threshold := 1_000 - buffer
+
+	hugeSummary := strings.Repeat("word ", threshold+100)
+	smallSummary := "compact"
+
+	llm := &countingMockLLM{
+		name:      "tiny-model",
+		responses: []string{hugeSummary, hugeSummary, smallSummary},
+	}
+	s := newThresholdStrategy(registry, llm, 0)
+	ctx := newMockCallbackContext("agent1")
+
+	req := &model.LLMRequest{
+		Model:    "tiny-model",
+		Contents: makeLargeConversation(5_000),
+	}
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if llm.calls < 2 {
+		t.Errorf("expected multiple summarization attempts, got %d", llm.calls)
+	}
+
+	if llm.calls > maxCompactionAttempts {
+		t.Errorf("calls (%d) exceeded maxCompactionAttempts (%d)", llm.calls, maxCompactionAttempts)
+	}
+}
+
+func TestThresholdStrategy_BestEffortAfterMaxAttempts(t *testing.T) {
+	registry := &mockRegistry{
+		contextWindows: map[string]int{"tiny-model": 1_000},
+		maxTokens:      map[string]int{"tiny-model": 256},
+	}
+	buffer := computeBuffer(1_000)
+	threshold := 1_000 - buffer
+
+	hugeSummary := strings.Repeat("word ", threshold+500)
+
+	llm := &countingMockLLM{
+		name:      "tiny-model",
+		responses: []string{hugeSummary, hugeSummary, hugeSummary},
+	}
+	s := newThresholdStrategy(registry, llm, 0)
+	ctx := newMockCallbackContext("agent1")
+
+	req := &model.LLMRequest{
+		Model:    "tiny-model",
+		Contents: makeLargeConversation(5_000),
+	}
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("expected best-effort (no error), got: %v", err)
+	}
+
+	if llm.calls != maxCompactionAttempts {
+		t.Errorf("expected exactly %d attempts, got %d", maxCompactionAttempts, llm.calls)
+	}
+
+	summary := loadSummary(ctx)
+	if summary == "" {
+		t.Error("summary should still be persisted even when over threshold (best-effort)")
+	}
+}
+
+func TestThresholdStrategy_NoRetryWhenFirstAttemptFits(t *testing.T) {
+	registry := &mockRegistry{
+		contextWindows: map[string]int{"tiny-model": 1_000},
+		maxTokens:      map[string]int{"tiny-model": 256},
+	}
+
+	llm := &countingMockLLM{
+		name:      "tiny-model",
+		responses: []string{"short"},
+	}
+	s := newThresholdStrategy(registry, llm, 0)
+	ctx := newMockCallbackContext("agent1")
+
+	req := &model.LLMRequest{
+		Model:    "tiny-model",
+		Contents: makeLargeConversation(5_000),
+	}
+
+	err := s.Compact(ctx, req)
+	if err != nil {
+		t.Fatalf("Compact error: %v", err)
+	}
+
+	if llm.calls != 1 {
+		t.Errorf("expected exactly 1 attempt when summary fits, got %d", llm.calls)
 	}
 }
