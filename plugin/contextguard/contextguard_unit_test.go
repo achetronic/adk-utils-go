@@ -1225,8 +1225,8 @@ func TestWithMaxTokens_SetsField(t *testing.T) {
 func TestWithMaxCompactionAttempts_SetsField(t *testing.T) {
 	cfg := &agentConfig{}
 	WithMaxCompactionAttempts(5)(cfg)
-	if cfg.maxAttempts != 5 {
-		t.Errorf("maxAttempts = %d, want 5", cfg.maxAttempts)
+	if cfg.maxCompactionAttempts != 5 {
+		t.Errorf("maxCompactionAttempts = %d, want 5", cfg.maxCompactionAttempts)
 	}
 	if cfg.strategy != "" {
 		t.Errorf("strategy should not be set, got %q", cfg.strategy)

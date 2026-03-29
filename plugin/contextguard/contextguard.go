@@ -106,7 +106,7 @@ type agentConfig struct {
 	strategy    string
 	maxTurns    int
 	maxTokens   int
-	maxAttempts int
+	maxCompactionAttempts int
 }
 
 // WithSlidingWindow selects the sliding-window strategy with the given
@@ -132,7 +132,7 @@ func WithMaxTokens(maxTokens int) AgentOption {
 // strategies. Defaults to 3 when not set or when n <= 0.
 func WithMaxCompactionAttempts(n int) AgentOption {
 	return func(c *agentConfig) {
-		c.maxAttempts = n
+		c.maxCompactionAttempts = n
 	}
 }
 
@@ -162,9 +162,9 @@ func (g *ContextGuard) Add(agentID string, llm model.LLM, opts ...AgentOption) {
 		opt(cfg)
 	}
 
-	maxAttempts := cfg.maxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = maxCompactionAttempts
+	maxCompactionAttempts := cfg.maxCompactionAttempts
+	if maxCompactionAttempts <= 0 {
+		maxCompactionAttempts = maxCompactionAttempts
 	}
 
 	switch cfg.strategy {
@@ -173,9 +173,9 @@ func (g *ContextGuard) Add(agentID string, llm model.LLM, opts ...AgentOption) {
 		if maxTurns <= 0 {
 			maxTurns = defaultMaxTurns
 		}
-		g.strategies[agentID] = newSlidingWindowStrategy(g.registry, llm, maxTurns, maxAttempts)
+		g.strategies[agentID] = newSlidingWindowStrategy(g.registry, llm, maxTurns, maxCompactionAttempts)
 	default:
-		g.strategies[agentID] = newThresholdStrategy(g.registry, llm, cfg.maxTokens, maxAttempts)
+		g.strategies[agentID] = newThresholdStrategy(g.registry, llm, cfg.maxTokens, maxCompactionAttempts)
 	}
 
 	slog.Info("ContextGuard: strategy configured",

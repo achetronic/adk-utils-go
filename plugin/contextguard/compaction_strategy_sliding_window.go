@@ -31,19 +31,19 @@ type slidingWindowStrategy struct {
 	registry    ModelRegistry
 	llm         model.LLM
 	maxTurns    int
-	maxAttempts int
+	maxCompactionAttempts int
 	mu          sync.Mutex
 }
 
 const recentKeepRatio = 0.30
 
 // newSlidingWindowStrategy creates a sliding window strategy for a single agent.
-func newSlidingWindowStrategy(registry ModelRegistry, llm model.LLM, maxTurns int, maxAttempts int) *slidingWindowStrategy {
+func newSlidingWindowStrategy(registry ModelRegistry, llm model.LLM, maxTurns int, maxCompactionAttempts int) *slidingWindowStrategy {
 	return &slidingWindowStrategy{
 		registry:    registry,
 		llm:         llm,
 		maxTurns:    maxTurns,
-		maxAttempts: maxAttempts,
+		maxCompactionAttempts: maxCompactionAttempts,
 	}
 }
 
@@ -92,7 +92,7 @@ func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LL
 	todos := loadTodos(ctx)
 	recentKeep := max(3, s.maxTurns*30/100)
 
-	for attempt := range s.maxAttempts {
+	for attempt := range s.maxCompactionAttempts {
 		splitIdx := safeSplitIndex(req.Contents, len(req.Contents)-recentKeep)
 		oldContents := req.Contents[:splitIdx]
 		recentContents := req.Contents[splitIdx:]
@@ -139,7 +139,7 @@ func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LL
 			break
 		}
 
-		if attempt < s.maxAttempts-1 {
+		if attempt < s.maxCompactionAttempts-1 {
 			recentKeep = max(3, recentKeep/2)
 			slog.Warn("ContextGuard [sliding_window]: still above threshold, retrying with smaller window",
 				"agent", ctx.AgentName(),
