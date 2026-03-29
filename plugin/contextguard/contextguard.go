@@ -103,9 +103,10 @@ type Strategy interface {
 type AgentOption func(*agentConfig)
 
 type agentConfig struct {
-	strategy  string
-	maxTurns  int
-	maxTokens int
+	strategy    string
+	maxTurns    int
+	maxTokens   int
+	maxAttempts int
 }
 
 // WithSlidingWindow selects the sliding-window strategy with the given
@@ -123,6 +124,15 @@ func WithSlidingWindow(maxTurns int) AgentOption {
 func WithMaxTokens(maxTokens int) AgentOption {
 	return func(c *agentConfig) {
 		c.maxTokens = maxTokens
+	}
+}
+
+// WithMaxCompactionAttempts sets the maximum number of summarization retries
+// when a single compaction pass still exceeds the threshold. Applies to both
+// strategies. Defaults to 3 when not set or when n <= 0.
+func WithMaxCompactionAttempts(n int) AgentOption {
+	return func(c *agentConfig) {
+		c.maxAttempts = n
 	}
 }
 
@@ -152,15 +162,20 @@ func (g *ContextGuard) Add(agentID string, llm model.LLM, opts ...AgentOption) {
 		opt(cfg)
 	}
 
+	maxAttempts := cfg.maxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = maxCompactionAttempts
+	}
+
 	switch cfg.strategy {
 	case StrategySlidingWindow:
 		maxTurns := cfg.maxTurns
 		if maxTurns <= 0 {
 			maxTurns = defaultMaxTurns
 		}
-		g.strategies[agentID] = newSlidingWindowStrategy(g.registry, llm, maxTurns)
+		g.strategies[agentID] = newSlidingWindowStrategy(g.registry, llm, maxTurns, maxAttempts)
 	default:
-		g.strategies[agentID] = newThresholdStrategy(g.registry, llm, cfg.maxTokens)
+		g.strategies[agentID] = newThresholdStrategy(g.registry, llm, cfg.maxTokens, maxAttempts)
 	}
 
 	slog.Info("ContextGuard: strategy configured",

@@ -111,7 +111,7 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 		name:     cfg.modelName,
 		response: "Summary: conversation involved investigating issues with tools. Key decisions were made. Specific next steps identified.",
 	}
-	strategy := newThresholdStrategy(registry, llm, 0)
+	strategy := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
 
 	guard := &contextGuard{
 		strategies: map[string]Strategy{

@@ -34,19 +34,21 @@ import (
 // Compaction always produces a full summary (no recent tail preserved),
 // matching Crush CLI behaviour. The result is [summary] + [continuation].
 type thresholdStrategy struct {
-	registry  ModelRegistry
-	llm       model.LLM
-	maxTokens int
-	mu        sync.Mutex
+	registry    ModelRegistry
+	llm         model.LLM
+	maxTokens   int
+	maxAttempts int
+	mu          sync.Mutex
 }
 
 // newThresholdStrategy creates a threshold strategy. If maxTokens > 0 it
 // overrides the registry lookup for the context window size.
-func newThresholdStrategy(registry ModelRegistry, llm model.LLM, maxTokens int) *thresholdStrategy {
+func newThresholdStrategy(registry ModelRegistry, llm model.LLM, maxTokens int, maxAttempts int) *thresholdStrategy {
 	return &thresholdStrategy{
-		registry:  registry,
-		llm:       llm,
-		maxTokens: maxTokens,
+		registry:    registry,
+		llm:         llm,
+		maxTokens:   maxTokens,
+		maxAttempts: maxAttempts,
 	}
 }
 
@@ -88,7 +90,7 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 	userContent := ctx.UserContent()
 	todos := loadTodos(ctx)
 
-	for attempt := range maxCompactionAttempts {
+	for attempt := range s.maxAttempts {
 		slog.Info("ContextGuard [threshold]: threshold exceeded, summarizing",
 			"agent", ctx.AgentName(),
 			"session", ctx.SessionID(),
@@ -135,7 +137,7 @@ func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMReq
 			break
 		}
 
-		if attempt < maxCompactionAttempts-1 {
+		if attempt < s.maxAttempts-1 {
 			slog.Warn("ContextGuard [threshold]: still above threshold after compaction, retrying",
 				"agent", ctx.AgentName(),
 				"attempt", attempt+1,

@@ -296,7 +296,7 @@ func runThresholdSimulation(t *testing.T, scenario string, contents []*genai.Con
 		name:     "sim-model",
 		response: "Summary: The conversation involved multiple tool calls to investigate and resolve issues. Key findings and decisions were made. Next steps were identified.",
 	}
-	s := newThresholdStrategy(registry, llm, 0)
+	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
 	ctx := newMockCallbackContext("sim-agent")
 
 	req := &model.LLMRequest{
@@ -358,7 +358,7 @@ func runSlidingWindowSimulation(t *testing.T, scenario string, contents []*genai
 		name:     "gpt-4o",
 		response: "Summary: The conversation involved multiple tool calls to investigate and resolve issues. Key findings and decisions were made.",
 	}
-	s := newSlidingWindowStrategy(registry, llm, maxTurns)
+	s := newSlidingWindowStrategy(registry, llm, maxTurns, maxCompactionAttempts)
 	ctx := newMockCallbackContext("sim-agent")
 
 	req := &model.LLMRequest{
@@ -1009,7 +1009,7 @@ func TestTimingGap_MassiveToolResponse(t *testing.T) {
 		maxTokens:      map[string]int{"test-model": 4096},
 	}
 	llm := &mockLLM{name: "test-model", response: "Compacted summary of the conversation."}
-	s := newThresholdStrategy(registry, llm, 0)
+	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
 
 	err := s.Compact(ctx, req)
 	if err != nil {

@@ -317,6 +317,9 @@ guard.Add("researcher", llmResearcher, contextguard.WithSlidingWindow(30))
 
 // Manual context window override — bypasses the registry for this agent
 guard.Add("writer", llmWriter, contextguard.WithMaxTokens(1_000_000))
+
+// Custom compaction retry limit (default: 3) — applies to both strategies
+guard.Add("analyst", llmAnalyst, contextguard.WithMaxCompactionAttempts(5))
 ```
 
 Multi-agent setup is the same API — just call `Add` multiple times:
