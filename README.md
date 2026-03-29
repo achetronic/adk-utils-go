@@ -266,6 +266,7 @@ ctx = langfuse.WithTraceMetadata(ctx, map[string]string{"tenant": "acme"})
 | `Environment` | No | — | Deployment environment tag |
 | `Release` | No | — | Application version tag |
 | `ServiceName` | No | `langfuse-adk` | OTel `service.name` resource attribute |
+| `Insecure` | No | `false` | Disable TLS for the OTLP/HTTP exporter (for self-hosted plain-HTTP instances) |
 
 Use `cfg.IsEnabled()` to conditionally skip setup when credentials are absent.
 

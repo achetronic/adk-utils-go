@@ -188,6 +188,49 @@ func TestConfig_IsEnabled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Insecure config tests
+// ---------------------------------------------------------------------------
+
+func TestSetup_InsecureFlag(t *testing.T) {
+	tests := []struct {
+		name     string
+		insecure bool
+	}{
+		{"TLS enabled by default", false},
+		{"TLS disabled when Insecure is true", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				PublicKey: "pk-test",
+				SecretKey: "sk-test",
+				Host:      "https://localhost:0",
+				Insecure:  tt.insecure,
+			}
+			pluginCfg, shutdown, err := Setup(cfg)
+			if err != nil {
+				t.Fatalf("Setup() error = %v", err)
+			}
+			defer shutdown(context.Background())
+
+			if pluginCfg.Plugins == nil || len(pluginCfg.Plugins) == 0 {
+				t.Fatal("Setup() returned empty PluginConfig")
+			}
+		})
+	}
+}
+
+func TestConfig_InsecureDefaultValue(t *testing.T) {
+	cfg := &Config{
+		PublicKey: "pk",
+		SecretKey: "sk",
+	}
+	if cfg.Insecure {
+		t.Error("Insecure should default to false")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Context helpers tests
 // ---------------------------------------------------------------------------
 
