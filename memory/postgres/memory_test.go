@@ -120,7 +120,7 @@ func TestAddSession(t *testing.T) {
 		{"assistant", "The capital of France is Paris."},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
@@ -148,12 +148,12 @@ func TestAddSessionDuplicates(t *testing.T) {
 	})
 
 	// Add same session twice
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("First AddSession failed: %v", err)
 	}
 
-	err = svc.AddSession(ctx, sess)
+	err = svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("Second AddSession failed: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestAddSessionEmptyEvents(t *testing.T) {
 
 	sess := createTestSession("sess-empty", "test_app", "user-1", nil)
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession with empty events failed: %v", err)
 	}
@@ -208,13 +208,13 @@ func TestSearchByText(t *testing.T) {
 		{"assistant", "Docker is a containerization platform for packaging applications"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 
 	// Search for "Kubernetes"
-	resp, err := svc.Search(ctx, &memory.SearchRequest{
+	resp, err := svc.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: "test_app",
 		UserID:  "user-1",
 		Query:   "Kubernetes",
@@ -248,7 +248,7 @@ func TestSearchByTextNoResults(t *testing.T) {
 	defer svc.Close()
 	ctx := context.Background()
 
-	resp, err := svc.Search(ctx, &memory.SearchRequest{
+	resp, err := svc.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: "test_app",
 		UserID:  "user-nonexistent",
 		Query:   "something that does not exist xyz123",
@@ -277,13 +277,13 @@ func TestSearchRecent(t *testing.T) {
 		{"assistant", "Second response"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 
 	// Search with empty query should return recent entries
-	resp, err := svc.Search(ctx, &memory.SearchRequest{
+	resp, err := svc.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: "test_app",
 		UserID:  "user-recent",
 		Query:   "",
@@ -308,7 +308,7 @@ func TestSearchIsolationByUser(t *testing.T) {
 	sessA := createTestSession("sess-a", "test_app", "user-a", []struct{ author, text string }{
 		{"user", "User A secret information"},
 	})
-	err := svc.AddSession(ctx, sessA)
+	err := svc.AddSessionToMemory(ctx, sessA)
 	if err != nil {
 		t.Fatalf("AddSession for user-a failed: %v", err)
 	}
@@ -317,13 +317,13 @@ func TestSearchIsolationByUser(t *testing.T) {
 	sessB := createTestSession("sess-b", "test_app", "user-b", []struct{ author, text string }{
 		{"user", "User B different information"},
 	})
-	err = svc.AddSession(ctx, sessB)
+	err = svc.AddSessionToMemory(ctx, sessB)
 	if err != nil {
 		t.Fatalf("AddSession for user-b failed: %v", err)
 	}
 
 	// Search as user-a should not find user-b's data
-	resp, err := svc.Search(ctx, &memory.SearchRequest{
+	resp, err := svc.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: "test_app",
 		UserID:  "user-a",
 		Query:   "information",
@@ -353,7 +353,7 @@ func TestSearchIsolationByApp(t *testing.T) {
 	sess1 := createTestSession("sess-app1", "test_app_1", "user-1", []struct{ author, text string }{
 		{"user", "App 1 secret data"},
 	})
-	err := svc.AddSession(ctx, sess1)
+	err := svc.AddSessionToMemory(ctx, sess1)
 	if err != nil {
 		t.Fatalf("AddSession for app-1 failed: %v", err)
 	}
@@ -362,13 +362,13 @@ func TestSearchIsolationByApp(t *testing.T) {
 	sess2 := createTestSession("sess-app2", "test_app_2", "user-1", []struct{ author, text string }{
 		{"user", "App 2 different data"},
 	})
-	err = svc.AddSession(ctx, sess2)
+	err = svc.AddSessionToMemory(ctx, sess2)
 	if err != nil {
 		t.Fatalf("AddSession for app-2 failed: %v", err)
 	}
 
 	// Search in app-1 should not find app-2's data
-	resp, err := svc.Search(ctx, &memory.SearchRequest{
+	resp, err := svc.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: "test_app_1",
 		UserID:  "user-1",
 		Query:   "data",
@@ -399,7 +399,7 @@ func TestSearchWithID(t *testing.T) {
 		{"assistant", "Go is a great language for building scalable systems"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestSearchWithIDRecent(t *testing.T) {
 		{"assistant", "I will remember it"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestUpdateMemory(t *testing.T) {
 		{"assistant", "The user likes cats"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestUpdateMemoryIsolation(t *testing.T) {
 		{"assistant", "Private data for user-update-iso"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
@@ -590,7 +590,7 @@ func TestDeleteMemory(t *testing.T) {
 		{"assistant", "Temporary information to delete"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestDeleteMemoryIsolation(t *testing.T) {
 		{"assistant", "Private data for user-delete-iso"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
@@ -702,7 +702,7 @@ func TestDeleteThenSearch(t *testing.T) {
 		{"assistant", "The user works at Acme Corp"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
@@ -748,7 +748,7 @@ func TestUpdateThenSearch(t *testing.T) {
 		{"assistant", "The user prefers dark mode"},
 	})
 
-	err := svc.AddSession(ctx, sess)
+	err := svc.AddSessionToMemory(ctx, sess)
 	if err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}

@@ -215,7 +215,7 @@ Guidelines:
 
 	// Long-term memories
 	fmt.Println("\nLong-term memories about user:")
-	searchResult, err := pgMemoryService.Search(ctx, &memory.SearchRequest{
+	searchResult, err := pgMemoryService.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: appName,
 		UserID:  userID,
 		Query:   "user preferences work",

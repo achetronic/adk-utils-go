@@ -155,8 +155,8 @@ func (s *PostgresMemoryService) initSchema(ctx context.Context) error {
 	return nil
 }
 
-// AddSession extracts memory entries from a session and stores them.
-func (s *PostgresMemoryService) AddSession(ctx context.Context, sess session.Session) error {
+// AddSessionToMemory extracts memory entries from a session and stores them.
+func (s *PostgresMemoryService) AddSessionToMemory(ctx context.Context, sess session.Session) error {
 	events := sess.Events()
 	if events == nil || events.Len() == 0 {
 		return nil
@@ -258,8 +258,8 @@ func (s *PostgresMemoryService) AddSession(ctx context.Context, sess session.Ses
 	return tx.Commit()
 }
 
-// Search finds relevant memory entries for a query.
-func (s *PostgresMemoryService) Search(ctx context.Context, req *memory.SearchRequest) (*memory.SearchResponse, error) {
+// SearchMemory finds relevant memory entries for a query.
+func (s *PostgresMemoryService) SearchMemory(ctx context.Context, req *memory.SearchRequest) (*memory.SearchResponse, error) {
 	var memories []memory.Entry
 	var err error
 

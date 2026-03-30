@@ -33,8 +33,8 @@ type EntryWithID struct {
 
 // MemoryService defines the base interface for a memory backend.
 type MemoryService interface {
-	AddSession(ctx context.Context, s session.Session) error
-	Search(ctx context.Context, req *memory.SearchRequest) (*memory.SearchResponse, error)
+	AddSessionToMemory(ctx context.Context, s session.Session) error
+	SearchMemory(ctx context.Context, req *memory.SearchRequest) (*memory.SearchResponse, error)
 }
 
 // ExtendedMemoryService extends MemoryService with update, delete, and ID-aware search.

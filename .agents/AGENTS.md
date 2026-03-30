@@ -8,7 +8,7 @@ A Go library providing utilities for Google's Agent Development Kit (ADK). This 
 
 **Module**: `github.com/achetronic/adk-utils-go` (see `go.mod`)  
 **Go Version**: 1.24.9+ (toolchain 1.25.5)  
-**ADK Version**: v0.5.0
+**ADK Version**: v1.0.0
 
 ### Key Dependencies
 

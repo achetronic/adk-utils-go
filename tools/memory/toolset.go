@@ -190,7 +190,7 @@ func (ts *Toolset) searchMemory(ctx tool.Context, args SearchArgs) (SearchResult
 		}, nil
 	}
 
-	resp, err := ts.memoryService.Search(ctx, req)
+	resp, err := ts.memoryService.SearchMemory(ctx, req)
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("failed to search memory: %w", err)
 	}
@@ -245,7 +245,7 @@ func (ts *Toolset) saveToMemory(ctx tool.Context, args SaveArgs) (SaveResult, er
 		category: args.Category,
 	}
 
-	err := ts.memoryService.AddSession(ctx, memorySession)
+	err := ts.memoryService.AddSessionToMemory(ctx, memorySession)
 	if err != nil {
 		return SaveResult{
 			Success: false,
