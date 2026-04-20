@@ -311,6 +311,45 @@ func (m *Model) applyGenerationConfig(params *openai.ChatCompletionNewParams, cf
 			params.Tools = tools
 		}
 	}
+
+	// ToolConfig → tool_choice
+	//
+	// Maps genai.FunctionCallingConfig.Mode to OpenAI's tool_choice:
+	//   ModeAuto → "auto"   (default behaviour; model may or may not call a tool)
+	//   ModeAny  → "required" (model MUST call a tool; use for agentic loops
+	//                         that can't handle a plain-text reply)
+	//   ModeNone → "none"   (tools disabled for this call even if provided)
+	//
+	// When AllowedFunctionNames is set with ModeAny, OpenAI's equivalent is a
+	// named function choice — we pick the first name since OpenAI's
+	// tool_choice accepts only one specific function, not a list. Callers who
+	// need a multi-function allowlist should rely on ModeAny plus prompt-level
+	// instructions to pick within the allowed set.
+	if cfg.ToolConfig != nil && cfg.ToolConfig.FunctionCallingConfig != nil {
+		fcc := cfg.ToolConfig.FunctionCallingConfig
+		switch fcc.Mode {
+		case genai.FunctionCallingConfigModeAuto:
+			params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+				OfAuto: openai.String("auto"),
+			}
+		case genai.FunctionCallingConfigModeNone:
+			params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+				OfAuto: openai.String("none"),
+			}
+		case genai.FunctionCallingConfigModeAny:
+			if len(fcc.AllowedFunctionNames) == 1 {
+				params.ToolChoice = openai.ToolChoiceOptionFunctionToolChoice(
+					openai.ChatCompletionNamedToolChoiceFunctionParam{
+						Name: fcc.AllowedFunctionNames[0],
+					},
+				)
+			} else {
+				params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+					OfAuto: openai.String("required"),
+				}
+			}
+		}
+	}
 }
 
 // convertContentToMessages converts a genai.Content into OpenAI message format.
