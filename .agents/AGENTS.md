@@ -12,13 +12,13 @@ A Go library providing utilities for Google's Agent Development Kit (ADK). This 
 
 ### Key Dependencies
 
-| Package | Purpose |
-|---------|---------|
-| `google.golang.org/adk` | Google ADK core framework |
-| `google.golang.org/genai` | Google GenAI types |
-| `github.com/redis/go-redis/v9` | Redis client for session storage |
-| `github.com/lib/pq` | PostgreSQL driver for memory storage |
-| `charm.land/catwalk` | Embedded model registry (564 models, 23 providers) |
+| Package                        | Purpose                                            |
+| ------------------------------ | -------------------------------------------------- |
+| `google.golang.org/adk`        | Google ADK core framework                          |
+| `google.golang.org/genai`      | Google GenAI types                                 |
+| `github.com/redis/go-redis/v9` | Redis client for session storage                   |
+| `github.com/lib/pq`            | PostgreSQL driver for memory storage               |
+| `charm.land/catwalk`           | Embedded model registry (564 models, 23 providers) |
 
 ---
 
@@ -112,17 +112,17 @@ adk-utils-go/
 
 ### Package Purposes
 
-| Package | Description |
-|---------|-------------|
-| `genai/openai` | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`) |
-| `genai/anthropic` | Anthropic Claude `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`) |
-| `session/redis` | Redis-backed implementation of `session.Service` |
-| `memory/memorytypes` | Shared types (`EntryWithID`) and interfaces (`MemoryService`, `ExtendedMemoryService`) |
-| `memory/postgres` | PostgreSQL+pgvector implementation of `memory.Service` and `ExtendedMemoryService` |
-| `artifact/filesystem` | Filesystem-backed `artifact.Service` implementation |
-| `tools/memory` | ADK toolset providing `search_memory`, `save_to_memory`, `update_memory`, and `delete_memory` tools |
-| `plugin/contextguard` | ADK plugin for context window management (threshold + sliding window strategies) |
-| `plugin/langfuse` | ADK plugin for Langfuse observability via OTLP/HTTP (LLM request/response enrichment, token usage, cost tracking) |
+| Package               | Description                                                                                                       |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `genai/openai`        | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)  |
+| `genai/anthropic`     | Anthropic Claude `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)          |
+| `session/redis`       | Redis-backed implementation of `session.Service`                                                                  |
+| `memory/memorytypes`  | Shared types (`EntryWithID`) and interfaces (`MemoryService`, `ExtendedMemoryService`)                            |
+| `memory/postgres`     | PostgreSQL+pgvector implementation of `memory.Service` and `ExtendedMemoryService`                                |
+| `artifact/filesystem` | Filesystem-backed `artifact.Service` implementation                                                               |
+| `tools/memory`        | ADK toolset providing `search_memory`, `save_to_memory`, `update_memory`, and `delete_memory` tools               |
+| `plugin/contextguard` | ADK plugin for context window management (threshold + sliding window strategies)                                  |
+| `plugin/langfuse`     | ADK plugin for Langfuse observability via OTLP/HTTP (LLM request/response enrichment, token usage, cost tracking) |
 
 ---
 
@@ -166,6 +166,7 @@ userstate:{appName}:{userID}             # Per-user state (HASH, shared across a
 ### PostgreSQL Schema
 
 The `memory_entries` table uses:
+
 - Composite unique constraint: `(app_name, user_id, session_id, event_id)`
 - Full-text search via `tsvector` on `content_text`
 - Vector similarity search via `pgvector` extension on `embedding` column (optional)
@@ -244,7 +245,7 @@ This codebase uses Go 1.24's `iter.Seq` and `iter.Seq2` for iteration:
 // State iteration
 func (s *State) All() iter.Seq2[string, any]
 
-// Events iteration  
+// Events iteration
 func (e *Events) All() iter.Seq[*session.Event]
 ```
 
@@ -313,13 +314,13 @@ cfg := guard.PluginConfig()           // runner.PluginConfig with BeforeModelCal
 
 ### State Keys
 
-| Key | Set by | Read by | Purpose |
-|---|---|---|---|
-| `__context_guard_summary_{agent}` | `BeforeModelCallback` | `BeforeModelCallback` | Running conversation summary |
-| `__context_guard_summarized_at_{agent}` | `BeforeModelCallback` | (diagnostic) | Token count at last compaction |
-| `__context_guard_real_tokens_{agent}` | `AfterModelCallback` | `BeforeModelCallback` | Real `PromptTokenCount` from provider |
-| `__context_guard_last_heuristic_{agent}` | `BeforeModelCallback` | `BeforeModelCallback` | Heuristic estimate for calibration |
-| `__context_guard_contents_at_compaction_{agent}` | Sliding window | Sliding window | Watermark for turn counting |
+| Key                                              | Set by                | Read by               | Purpose                               |
+| ------------------------------------------------ | --------------------- | --------------------- | ------------------------------------- |
+| `__context_guard_summary_{agent}`                | `BeforeModelCallback` | `BeforeModelCallback` | Running conversation summary          |
+| `__context_guard_summarized_at_{agent}`          | `BeforeModelCallback` | (diagnostic)          | Token count at last compaction        |
+| `__context_guard_real_tokens_{agent}`            | `AfterModelCallback`  | `BeforeModelCallback` | Real `PromptTokenCount` from provider |
+| `__context_guard_last_heuristic_{agent}`         | `BeforeModelCallback` | `BeforeModelCallback` | Heuristic estimate for calibration    |
+| `__context_guard_contents_at_compaction_{agent}` | Sliding window        | Sliding window        | Watermark for turn counting           |
 
 ### File Naming Convention
 
@@ -348,10 +349,10 @@ Cover 200k and 8k context windows, token ratios 1.5x-4.0x, with/without UsageMet
 
 ### Strategies
 
-| Strategy | Trigger | Compaction mode | Config |
-|---|---|---|---|
-| `threshold` | calibrated tokens > (contextWindow - buffer) | Full summary (entire conversation) | `WithMaxTokens(n)` or auto from registry |
-| `sliding_window` | turns since last compaction > maxTurns | Split: summarize old, keep recent tail | `WithSlidingWindow(n)` |
+| Strategy         | Trigger                                      | Compaction mode                        | Config                                   |
+| ---------------- | -------------------------------------------- | -------------------------------------- | ---------------------------------------- |
+| `threshold`      | calibrated tokens > (contextWindow - buffer) | Full summary (entire conversation)     | `WithMaxTokens(n)` or auto from registry |
+| `sliding_window` | turns since last compaction > maxTurns       | Split: summarize old, keep recent tail | `WithSlidingWindow(n)`                   |
 
 Buffer: fixed 20k for windows >=200k, 20% for smaller ones.
 
@@ -379,18 +380,17 @@ Without this translation, callers setting `Mode: ANY` on an LLM agent see the se
 
 ### Shared mapping (identical semantics across providers)
 
-| genai `FunctionCallingConfig.Mode` | OpenAI `tool_choice` | Anthropic `tool_choice` |
-|---|---|---|
-| `ModeUnspecified` (zero value) | unset | unset |
-| `ModeAuto` | `"auto"` | `{type: "auto"}` |
-| `ModeNone` | `"none"` | `{type: "none"}` |
-| `ModeAny`, no `AllowedFunctionNames` | `"required"` | `{type: "any"}` |
-| `ModeAny`, exactly one name | named function choice | `{type: "tool", name: <n>}` |
-| `ModeAny`, multiple names | fallback to `"required"` | fallback to `{type: "any"}` |
+| genai `FunctionCallingConfig.Mode`   | OpenAI `tool_choice`     | Anthropic `tool_choice`     |
+| ------------------------------------ | ------------------------ | --------------------------- |
+| `ModeUnspecified` (zero value)       | unset                    | unset                       |
+| `ModeAuto`                           | `"auto"`                 | `{type: "auto"}`            |
+| `ModeNone`                           | `"none"`                 | `{type: "none"}`            |
+| `ModeAny`, no `AllowedFunctionNames` | `"required"`             | `{type: "any"}`             |
+| `ModeAny`, exactly one name          | named function choice    | `{type: "tool", name: <n>}` |
+| `ModeAny`, multiple names            | fallback to `"required"` | fallback to `{type: "any"}` |
 
 The multi-name fallback is a pragmatic choice: neither provider accepts a list of allowed names in `tool_choice`. Callers who need a multi-function allowlist should combine `ModeAny` with prompt-level instructions.
 
 ### Tests
 
 Each adapter has a table-driven test (`openai_test.go` / `anthropic_test.go`) covering the seven relevant combinations (three modes, two branches of `AllowedFunctionNames`, two "leave it unset" paths). The Anthropic test asserts on the discriminated-union variant (`OfAuto` / `OfAny` / `OfTool` / `OfNone`) rather than the nested `Type` field because the SDK uses `shared/constant` single-value string types whose in-memory zero is `""` — the discriminator is injected during marshaling, and the variant pointer is what the marshaler keys off of.
-
