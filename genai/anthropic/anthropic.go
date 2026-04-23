@@ -272,6 +272,42 @@ func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewP
 			}
 			params.Tools = tools
 		}
+
+		// ToolConfig → tool_choice
+		//
+		// Maps genai.FunctionCallingConfig.Mode to Anthropic's tool_choice:
+		//   ModeAuto → {type: "auto"} (default behaviour; model may or may not call a tool)
+		//   ModeAny  → {type: "any"}  (model MUST call a tool; use for agentic loops
+		//                              that can't handle a plain-text reply)
+		//   ModeNone → {type: "none"} (tools disabled for this call even if provided)
+		//
+		// When AllowedFunctionNames holds exactly one name with ModeAny, Anthropic's
+		// equivalent is {type: "tool", name: "..."}. For multiple names we fall back
+		// to {type: "any"} because Anthropic's tool variant accepts a single name,
+		// not a list — same pragmatic choice as the OpenAI adapter. Callers who need
+		// a multi-function allowlist should rely on ModeAny plus prompt-level
+		// instructions to pick within the allowed set.
+		if req.Config.ToolConfig != nil && req.Config.ToolConfig.FunctionCallingConfig != nil {
+			fcc := req.Config.ToolConfig.FunctionCallingConfig
+			switch fcc.Mode {
+			case genai.FunctionCallingConfigModeAuto:
+				params.ToolChoice = anthropic.ToolChoiceUnionParam{
+					OfAuto: &anthropic.ToolChoiceAutoParam{},
+				}
+			case genai.FunctionCallingConfigModeNone:
+				params.ToolChoice = anthropic.ToolChoiceUnionParam{
+					OfNone: &anthropic.ToolChoiceNoneParam{},
+				}
+			case genai.FunctionCallingConfigModeAny:
+				if len(fcc.AllowedFunctionNames) == 1 {
+					params.ToolChoice = anthropic.ToolChoiceParamOfTool(fcc.AllowedFunctionNames[0])
+				} else {
+					params.ToolChoice = anthropic.ToolChoiceUnionParam{
+						OfAny: &anthropic.ToolChoiceAnyParam{},
+					}
+				}
+			}
+		}
 	}
 
 	return params, nil
