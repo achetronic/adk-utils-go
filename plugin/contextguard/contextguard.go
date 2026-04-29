@@ -73,7 +73,11 @@ const (
 	largeContextWindowBuffer    = 20_000
 	smallContextWindowRatio     = 0.20
 
-	maxCompactionAttempts = 3
+	// defaultMaxCompactionAttempts defines the maximum number of compaction
+	// passes performed in a single turn. If the first summary still exceeds
+	// the threshold, the compacted content is summarized again until it fits
+	// or the limit is reached, preventing infinite loops.
+	defaultMaxCompactionAttempts = 3
 
 	// defaultHeuristicCorrectionFactor is applied to the len/4 heuristic
 	// when no real token data is available for calibration. The value 2.5
@@ -164,7 +168,7 @@ func (g *ContextGuard) Add(agentID string, llm model.LLM, opts ...AgentOption) {
 
 	maxCompactionAttempts := cfg.maxCompactionAttempts
 	if maxCompactionAttempts <= 0 {
-		maxCompactionAttempts = maxCompactionAttempts
+		maxCompactionAttempts = defaultMaxCompactionAttempts
 	}
 
 	switch cfg.strategy {

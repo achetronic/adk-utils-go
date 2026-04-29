@@ -949,7 +949,7 @@ func TestBeforeModel_UnknownAgent(t *testing.T) {
 func TestThresholdStrategy_BelowThreshold(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "summary"}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -973,7 +973,7 @@ func TestThresholdStrategy_ExceedsThreshold(t *testing.T) {
 		maxTokens:      map[string]int{"small-model": 512},
 	}
 	llm := &mockLLM{name: "small-model", response: "Summarized conversation"}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -1000,7 +1000,7 @@ func TestThresholdStrategy_ExceedsThreshold(t *testing.T) {
 func TestThresholdStrategy_WithMaxTokensOverride(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "summary"}
-	s := newThresholdStrategy(registry, llm, 500, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 500, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -1020,7 +1020,7 @@ func TestThresholdStrategy_WithMaxTokensOverride(t *testing.T) {
 func TestThresholdStrategy_InjectsExistingSummary(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "new summary"}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	persistSummary(ctx, "old summary from last compaction", 5000)
@@ -1050,7 +1050,7 @@ func TestThresholdStrategy_InjectsExistingSummary(t *testing.T) {
 func TestSlidingWindowStrategy_BelowLimit(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "summary"}
-	s := newSlidingWindowStrategy(registry, llm, 50, maxCompactionAttempts)
+	s := newSlidingWindowStrategy(registry, llm, 50, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -1071,7 +1071,7 @@ func TestSlidingWindowStrategy_BelowLimit(t *testing.T) {
 func TestSlidingWindowStrategy_ExceedsLimit(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "Sliding window summary"}
-	s := newSlidingWindowStrategy(registry, llm, 5, maxCompactionAttempts)
+	s := newSlidingWindowStrategy(registry, llm, 5, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -1100,7 +1100,7 @@ func TestSlidingWindowStrategy_ExceedsLimit(t *testing.T) {
 func TestSlidingWindowStrategy_InjectsExistingSummary(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "new summary"}
-	s := newSlidingWindowStrategy(registry, llm, 100, maxCompactionAttempts)
+	s := newSlidingWindowStrategy(registry, llm, 100, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	persistSummary(ctx, "previous sliding window summary", 3000)
@@ -1122,7 +1122,7 @@ func TestSlidingWindowStrategy_InjectsExistingSummary(t *testing.T) {
 func TestSlidingWindowStrategy_RespectsWatermark(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "summary"}
-	s := newSlidingWindowStrategy(registry, llm, 10, maxCompactionAttempts)
+	s := newSlidingWindowStrategy(registry, llm, 10, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	persistContentsAtCompaction(ctx, 35)
@@ -1343,7 +1343,7 @@ func TestThresholdStrategy_IterativeCompaction(t *testing.T) {
 		maxTokens:      map[string]int{"small-model": 512},
 	}
 	llm := &mockLLM{name: "small-model", response: "compact summary"}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -1436,7 +1436,7 @@ func TestThresholdStrategy_AllToolCalls_StillCompacts(t *testing.T) {
 		maxTokens:      map[string]int{"small-model": 512},
 	}
 	llm := &mockLLM{name: "small-model", response: "Summarized tool conversation"}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	var contents []*genai.Content
@@ -1478,7 +1478,7 @@ func TestThresholdStrategy_AllToolCalls_StillCompacts(t *testing.T) {
 func TestSlidingWindowStrategy_AllToolCalls_StillCompacts(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "Summarized sliding window"}
-	s := newSlidingWindowStrategy(registry, llm, 5, maxCompactionAttempts)
+	s := newSlidingWindowStrategy(registry, llm, 5, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -1727,7 +1727,7 @@ func TestAfterModel_UnknownAgent(t *testing.T) {
 func TestThresholdStrategy_UsesRealTokens(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "compacted summary"}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -1757,7 +1757,7 @@ func TestThresholdStrategy_NoRecentTail(t *testing.T) {
 		maxTokens:      map[string]int{"small-model": 512},
 	}
 	llm := &mockLLM{name: "small-model", response: "Full summary of everything"}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -1840,7 +1840,7 @@ func TestThresholdStrategy_InjectsContinuation(t *testing.T) {
 		maxTokens:      map[string]int{"small-model": 512},
 	}
 	llm := &mockLLM{name: "small-model", response: "summary"}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 
 	ctx := &mockCallbackContext{
 		Context:   context.Background(),
@@ -1979,7 +1979,7 @@ func TestPluginConfig_HasAfterModelCallback(t *testing.T) {
 func TestThresholdStrategy_RealTokens_TriggersWhereHeuristicFails(t *testing.T) {
 	registry := newMockRegistry()
 	llm := &mockLLM{name: "gpt-4o", response: "compacted"}
-	s := newThresholdStrategy(registry, llm, 150_000, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 150_000, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	// Create a request where len/4 estimates ~50k tokens but "real" is 130k.
@@ -2027,7 +2027,7 @@ func TestThresholdStrategy_RetriesWhenSummaryTooLarge(t *testing.T) {
 		name:      "tiny-model",
 		responses: []string{hugeSummary, hugeSummary, smallSummary},
 	}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -2044,8 +2044,8 @@ func TestThresholdStrategy_RetriesWhenSummaryTooLarge(t *testing.T) {
 		t.Errorf("expected multiple summarization attempts, got %d", llm.calls)
 	}
 
-	if llm.calls > maxCompactionAttempts {
-		t.Errorf("calls (%d) exceeded maxCompactionAttempts (%d)", llm.calls, maxCompactionAttempts)
+	if llm.calls > defaultMaxCompactionAttempts {
+		t.Errorf("calls (%d) exceeded defaultMaxCompactionAttempts (%d)", llm.calls, defaultMaxCompactionAttempts)
 	}
 }
 
@@ -2063,7 +2063,7 @@ func TestThresholdStrategy_BestEffortAfterMaxAttempts(t *testing.T) {
 		name:      "tiny-model",
 		responses: []string{hugeSummary, hugeSummary, hugeSummary},
 	}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
@@ -2076,8 +2076,8 @@ func TestThresholdStrategy_BestEffortAfterMaxAttempts(t *testing.T) {
 		t.Fatalf("expected best-effort (no error), got: %v", err)
 	}
 
-	if llm.calls != maxCompactionAttempts {
-		t.Errorf("expected exactly %d attempts, got %d", maxCompactionAttempts, llm.calls)
+	if llm.calls != defaultMaxCompactionAttempts {
+		t.Errorf("expected exactly %d attempts, got %d", defaultMaxCompactionAttempts, llm.calls)
 	}
 
 	summary := loadSummary(ctx)
@@ -2096,7 +2096,7 @@ func TestThresholdStrategy_NoRetryWhenFirstAttemptFits(t *testing.T) {
 		name:      "tiny-model",
 		responses: []string{"short"},
 	}
-	s := newThresholdStrategy(registry, llm, 0, maxCompactionAttempts)
+	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 	ctx := newMockCallbackContext("agent1")
 
 	req := &model.LLMRequest{
