@@ -545,6 +545,8 @@ func convertToFunctionParams(params any) shared.FunctionParameters {
 		}
 	}
 
+	// Standardise types to lowercase for JSON schema compliance
+	lowercaseTypes(m)
 	// OpenAI requires "properties" for object types
 	ensureObjectProperties(m)
 
@@ -576,6 +578,26 @@ func ensureObjectProperties(schema map[string]any) {
 	// Process array items
 	if items, ok := schema["items"].(map[string]any); ok {
 		ensureObjectProperties(items)
+	}
+}
+
+// lowercaseTypes recursively traverses a JSON schema map and lowercases all "type" fields
+// to comply with standard JSON schema validation.
+func lowercaseTypes(m map[string]any) {
+	for k, v := range m {
+		if k == "type" {
+			if s, ok := v.(string); ok {
+				m[k] = strings.ToLower(s)
+			}
+		} else if vMap, ok := v.(map[string]any); ok {
+			lowercaseTypes(vMap)
+		} else if vList, ok := v.([]any); ok {
+			for _, item := range vList {
+				if itemMap, ok := item.(map[string]any); ok {
+					lowercaseTypes(itemMap)
+				}
+			}
+		}
 	}
 }
 

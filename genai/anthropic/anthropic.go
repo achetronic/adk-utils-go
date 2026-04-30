@@ -432,6 +432,7 @@ func (m *Model) convertTools(genaiTools []*genai.Tool) ([]anthropic.ToolUnionPar
 					}
 				}
 				if m != nil {
+					lowercaseTypes(m)
 					if props, ok := m["properties"]; ok {
 						inputSchema.Properties = props
 					}
@@ -711,4 +712,24 @@ func convertInlineDataToBlock(data *genai.Blob) (*anthropic.ContentBlockParamUni
 // hasContent returns true if the message has at least one content block.
 func hasContent(msg anthropic.MessageParam) bool {
 	return len(msg.Content) > 0
+}
+
+// lowercaseTypes recursively traverses a JSON schema map and lowercases all "type" fields
+// to comply with Anthropic's JSON schema validation.
+func lowercaseTypes(m map[string]any) {
+	for k, v := range m {
+		if k == "type" {
+			if s, ok := v.(string); ok {
+				m[k] = strings.ToLower(s)
+			}
+		} else if vMap, ok := v.(map[string]any); ok {
+			lowercaseTypes(vMap)
+		} else if vList, ok := v.([]any); ok {
+			for _, item := range vList {
+				if itemMap, ok := item.(map[string]any); ok {
+					lowercaseTypes(itemMap)
+				}
+			}
+		}
+	}
 }
