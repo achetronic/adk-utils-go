@@ -478,6 +478,13 @@ func buildFallbackSummary(contents []*genai.Content, previousSummary string) str
 // estimatePartTokens returns a rough token count for a single Part using
 // the ~4 chars per token heuristic. It accounts for Text, FunctionCall
 // (name + args), and FunctionResponse (name + response).
+//
+// As of genai v1.57 a Part can also carry ToolCall, ToolResponse and
+// PartMetadata (populated mainly by the bidi/live and server-side tool paths).
+// We fold those into the estimate too: a Part that only carried, say,
+// PartMetadata would otherwise be counted as 0 tokens, leading the threshold
+// strategy to under-estimate the request and skip a compaction it should have
+// triggered. Counting them is conservative and never decreases the estimate.
 func estimatePartTokens(part *genai.Part) int {
 	if part == nil {
 		return 0
@@ -500,6 +507,16 @@ func estimatePartTokens(part *genai.Part) int {
 	if part.InlineData != nil {
 		total += len(part.InlineData.MIMEType) / 4
 		total += len(part.InlineData.Data) / 4
+	}
+	if part.ToolCall != nil {
+		total += len(fmt.Sprintf("%v", part.ToolCall)) / 4
+	}
+	if part.ToolResponse != nil {
+		total += len(fmt.Sprintf("%v", part.ToolResponse)) / 4
+	}
+	for k, v := range part.PartMetadata {
+		total += len(k) / 4
+		total += len(fmt.Sprintf("%v", v)) / 4
 	}
 	return total
 }
