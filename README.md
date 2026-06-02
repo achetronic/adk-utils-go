@@ -6,7 +6,7 @@ Utilities and implementations for [Google's Agent Development Kit (ADK)](https:/
 
 This repository provides production-ready implementations for:
 
-- **LLM Clients**: OpenAI and Anthropic clients compatible with ADK
+- **LLM Clients**: OpenAI (Chat Completions), OpenAI Responses, and Anthropic clients compatible with ADK
 - **Session Management**: Redis-based session persistence
 - **Long-term Memory**: PostgreSQL + pgvector for semantic search
 - **Memory Tools**: Toolsets for agent-controlled memory operations
@@ -18,7 +18,8 @@ This repository provides production-ready implementations for:
 
 ```
 ├── genai/            # LLM client implementations
-│   ├── openai/       # OpenAI client (works with Ollama, OpenRouter, etc.)
+│   ├── openai/       # OpenAI Chat Completions client (works with Ollama, OpenRouter, etc.)
+│   ├── responses/    # OpenAI Responses API client (/v1/responses)
 │   └── anthropic/    # Anthropic Claude client
 ├── session/          # Session service implementations
 │   └── redis/        # Redis session service
@@ -92,9 +93,36 @@ llmModel := genaianthropic.New(genaianthropic.Config{
 })
 ```
 
+### OpenAI Responses Client
+
+An adapter for the OpenAI [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`) — the interface OpenAI recommends for new applications, with native reasoning, built-in tools, and structured output. The adapter runs the API statelessly (ADK owns the conversation state and replays the full history on each call), so it integrates exactly like the Chat Completions client:
+
+```go
+import genairesponses "github.com/achetronic/adk-utils-go/genai/responses"
+
+llmModel := genairesponses.New(genairesponses.Config{
+    APIKey:    os.Getenv("OPENAI_API_KEY"),
+    ModelName: "gpt-5.5",
+})
+
+agent, _ := llmagent.New(llmagent.Config{
+    Name:  "assistant",
+    Model: llmModel,
+})
+```
+
+**Which OpenAI adapter should I use?** Pick whichever fits your needs:
+
+| Adapter | When to use |
+|---|---|
+| `genai/responses` (Responses API) | OpenAI's recommended API — native reasoning items and structured output |
+| `genai/openai` (Chat Completions) | OpenAI-compatible gateways — Ollama, vLLM, DeepSeek, Kimi, etc. |
+
+Both OpenAI clients share the same `Config` fields (`APIKey`, `BaseURL`, `ModelName`, `HTTPOptions`). Reasoning is controlled per request through the ADK generation config: a `ThinkingConfig` maps to the Responses `reasoning.effort` level (`low` / `medium` / `high`) rather than a fixed token budget. Structured output is enabled by setting a response schema (JSON Schema) on the generation config.
+
 ### Custom HTTP Headers
 
-Both clients support custom HTTP headers via `HTTPOptions`, useful for beta features, auth proxies, or provider-specific flags:
+All clients support custom HTTP headers via `HTTPOptions`, useful for beta features, auth proxies, or provider-specific flags:
 
 ```go
 import "net/http"
@@ -112,16 +140,17 @@ llmModel := genaianthropic.New(genaianthropic.Config{
 
 ### Supported Features
 
-Both clients support:
+All clients support:
 
 - Streaming and non-streaming responses
 - System instructions
 - Tool/function calling
 - Image inputs (base64)
 - Temperature, TopP, MaxOutputTokens, StopSequences
-- Extended thinking (`ThinkingBudgetTokens`)
 - Usage metadata
 - Custom HTTP headers (multi-value)
+
+Reasoning is exposed differently per provider: Anthropic uses a token budget (`ThinkingBudgetTokens`), while the OpenAI Responses client uses a reasoning effort level (`low` / `medium` / `high`). The OpenAI Responses client additionally supports structured output via JSON Schema.
 
 ## Session Service (Redis)
 
@@ -374,6 +403,7 @@ Complete working examples in the `examples/` directory:
 | Example                                       | Description                                 |
 | --------------------------------------------- | ------------------------------------------- |
 | [openai-client](examples/openai-client)       | OpenAI/Ollama client usage                                |
+| [openai-responses-client](examples/openai-responses-client) | OpenAI Responses API client usage |
 | [anthropic-client](examples/anthropic-client) | Anthropic Claude client usage                             |
 | [session-memory](examples/session-memory)     | Session management with Redis                             |
 | [long-term-memory](examples/long-term-memory) | Long-term memory with PostgreSQL + pgvector               |

@@ -6,7 +6,7 @@ require (
 	charm.land/catwalk v0.25.0
 	github.com/anthropics/anthropic-sdk-go v1.19.0
 	github.com/lib/pq v1.10.9
-	github.com/openai/openai-go/v3 v3.16.0
+	github.com/openai/openai-go/v3 v3.36.0
 	github.com/redis/go-redis/v9 v9.17.2
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.41.0
@@ -37,8 +37,8 @@ require (
 	github.com/googleapis/gax-go/v2 v2.22.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
-	github.com/tidwall/gjson v1.18.0 // indirect
-	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/gjson v1.19.0 // indirect
+	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
