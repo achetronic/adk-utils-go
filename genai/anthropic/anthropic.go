@@ -48,7 +48,22 @@ type Model struct {
 	modelName            string
 	maxOutputTokens      int
 	thinkingBudgetTokens int
+	thinkingEffort       string
+	thinkingMode         string
 }
+
+// Reasoning API mode identifiers. They select which on-the-wire shape
+// the adapter uses to ask the model to reason:
+//
+//   - ThinkingModeEnabled is the CLASSIC API: "thinking":{"type":"enabled",
+//     "budget_tokens":N}. Accepted by Claude 3.7 / Sonnet 4 / Opus 4.
+//   - ThinkingModeAdaptive is the EFFORT-based API: "thinking":{"type":"adaptive"}
+//     plus "output_config":{"effort":"<level>"}. Required by Opus 4.5+, which
+//     reject the classic "enabled" form.
+const (
+	ThinkingModeEnabled  = "enabled"
+	ThinkingModeAdaptive = "adaptive"
+)
 
 // HTTPOptions holds optional HTTP-level configuration for the Anthropic client.
 type HTTPOptions struct {
@@ -57,24 +72,64 @@ type HTTPOptions struct {
 
 // Config holds configuration for creating a new Model.
 type Config struct {
-	// APIKey is the Anthropic API key. If empty, uses ANTHROPIC_API_KEY env var.
+	// APIKey is the Anthropic API key. If empty, the ANTHROPIC_API_KEY
+	// environment variable is used instead.
 	APIKey string
-	// BaseURL is the API base URL (optional, for custom endpoints).
+
+	// BaseURL overrides the API base URL. Leave empty for the default
+	// Anthropic endpoint; set it only to target a custom or proxy host.
 	BaseURL string
-	// ModelName is the model to use (e.g., "claude-sonnet-4-5-20250929").
+
+	// ModelName is the model identifier to call, e.g.
+	// "claude-sonnet-4-5-20250929".
 	ModelName string
-	// MaxOutputTokens sets the default maximum number of tokens Claude can generate in its response.
-	// This is an output-only limit and does not affect the input/context window.
-	// If zero, defaults to 4096.
+
+	// MaxOutputTokens caps how many tokens Claude may generate in its
+	// response. This is an output-only limit; it does not affect the input
+	// or context window. When zero, the adapter defaults to 4096.
 	MaxOutputTokens int
-	// ThinkingBudgetTokens enables extended thinking and sets how many output tokens Claude
-	// can spend generating its internal reasoning before producing the final response.
-	// Thinking tokens are output tokens — Claude generates the reasoning as text, it just
-	// isn't shown to the user (or is returned in a separate block).
-	// Must be >= 1024 and strictly less than MaxOutputTokens.
-	// If zero, extended thinking is disabled.
+
+	// ThinkingMode selects which reasoning API the request uses. It exists
+	// so the caller, not the adapter, decides the shape: the adapter never
+	// inspects the model name to guess.
+	//
+	// Accepted values:
+	//
+	//   ""          Auto. The mode is deduced from the fields you set:
+	//               ThinkingEffort set        => adaptive
+	//               else ThinkingBudgetTokens > 0 => enabled
+	//               else                       => no reasoning.
+	//
+	//   "enabled"   Classic budget-based API: "thinking":{"type":"enabled"}.
+	//               Requires ThinkingBudgetTokens > 0.
+	//
+	//   "adaptive"  Effort-based API: "thinking":{"type":"adaptive"} plus
+	//               "output_config":{"effort"}. Requires ThinkingEffort.
+	//
+	// Rule of thumb: "adaptive" for Opus 4.5 and newer, "enabled" (or auto)
+	// for older models.
+	ThinkingMode string
+
+	// ThinkingBudgetTokens drives the CLASSIC ("enabled") reasoning API. It
+	// is the number of output tokens Claude may spend on internal reasoning
+	// before writing its final answer. These thinking tokens count as output
+	// tokens, so the value must be >= 1024 and strictly less than
+	// MaxOutputTokens. Zero leaves classic extended thinking off.
+	//
+	// Accepted by Claude 3.7, Sonnet 4 and Opus 4. Newer models (Opus 4.5+)
+	// reject this form and need ThinkingEffort instead.
 	ThinkingBudgetTokens int
-	// HTTPOptions holds optional HTTP-level overrides (e.g. extra headers).
+
+	// ThinkingEffort drives the newer ("adaptive") reasoning API used by
+	// Opus 4.5 and later, which reject the classic "enabled" form. It sets
+	// the reasoning depth; typical values are "low", "medium" and "high"
+	// (some models also accept "xhigh" or "max"). When set, the request
+	// sends "thinking":{"type":"adaptive"} plus "output_config":{"effort"}.
+	// Empty leaves adaptive reasoning off.
+	ThinkingEffort string
+
+	// HTTPOptions carries optional HTTP-level overrides, such as extra
+	// request headers.
 	HTTPOptions HTTPOptions
 }
 
@@ -101,7 +156,27 @@ func New(cfg Config) *Model {
 		modelName:            cfg.ModelName,
 		maxOutputTokens:      cfg.MaxOutputTokens,
 		thinkingBudgetTokens: cfg.ThinkingBudgetTokens,
+		thinkingEffort:       cfg.ThinkingEffort,
+		thinkingMode:         cfg.ThinkingMode,
 	}
+}
+
+// resolveThinkingMode returns the effective reasoning API mode for this
+// model. An explicit ThinkingMode wins; otherwise it is deduced from
+// which knob the caller set (effort -> adaptive, budget -> enabled).
+// Returns "" when no reasoning was requested at all.
+func (m *Model) resolveThinkingMode() string {
+	switch m.thinkingMode {
+	case ThinkingModeAdaptive, ThinkingModeEnabled:
+		return m.thinkingMode
+	}
+	if m.thinkingEffort != "" {
+		return ThinkingModeAdaptive
+	}
+	if m.thinkingBudgetTokens > 0 {
+		return ThinkingModeEnabled
+	}
+	return ""
 }
 
 // Name returns the model name (e.g. "claude-sonnet-4-5-20250929").
@@ -117,6 +192,23 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 	return m.generate(ctx, req)
 }
 
+// reasoningRequestOptions returns the per-request options needed for
+// the adaptive (effort-based) reasoning API. When the resolved mode is
+// adaptive it injects "output_config.effort" directly into the JSON
+// body (the typed MessageNewParams has no field for it on the stable
+// API; it is added raw via sjson). The matching "thinking":{"type":
+// "adaptive"} block is set in buildMessageParams. Returns nil for any
+// other mode so the classic path is untouched.
+func (m *Model) reasoningRequestOptions() []option.RequestOption {
+	if m.resolveThinkingMode() != ThinkingModeAdaptive {
+		return nil
+	}
+	return []option.RequestOption{
+		option.WithJSONSet("thinking.type", "adaptive"),
+		option.WithJSONSet("output_config.effort", m.thinkingEffort),
+	}
+}
+
 // generate sends a single request and yields one complete response.
 func (m *Model) generate(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -126,7 +218,7 @@ func (m *Model) generate(ctx context.Context, req *model.LLMRequest) iter.Seq2[*
 			return
 		}
 
-		resp, err := m.client.Messages.New(ctx, params)
+		resp, err := m.client.Messages.New(ctx, params, m.reasoningRequestOptions()...)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -151,7 +243,7 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			return
 		}
 
-		stream := m.client.Messages.NewStreaming(ctx, params)
+		stream := m.client.Messages.NewStreaming(ctx, params, m.reasoningRequestOptions()...)
 
 		message := anthropic.Message{}
 
@@ -169,6 +261,22 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 				case anthropic.TextDelta:
 					if deltaVariant.Text != "" {
 						part := &genai.Part{Text: deltaVariant.Text}
+						llmResp := &model.LLMResponse{
+							Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{part}},
+							Partial:      true,
+							TurnComplete: false,
+						}
+						if !yield(llmResp, nil) {
+							return
+						}
+					}
+				case anthropic.ThinkingDelta:
+					// TODO(test): no coverage for the streaming thinking path.
+					// Asserting it needs a mock of the SDK's SSE stream; left as
+					// a follow-up. The non-streaming wire body is covered by
+					// TestWireBody_* and the block round-trip by TestThinkingBlockRoundTrip.
+					if deltaVariant.Thinking != "" {
+						part := &genai.Part{Text: deltaVariant.Thinking, Thought: true}
 						llmResp := &model.LLMResponse{
 							Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{part}},
 							Partial:      true,
@@ -202,6 +310,19 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 
 // buildMessageParams converts an LLMRequest into Anthropic's API format (system prompt, messages, tools, config).
 func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewParams, error) {
+	// Validate the reasoning configuration up front so misconfiguration
+	// fails locally with a clear message instead of as a server-side 400.
+	switch m.resolveThinkingMode() {
+	case ThinkingModeAdaptive:
+		if m.thinkingEffort == "" {
+			return anthropic.MessageNewParams{}, fmt.Errorf("anthropic: thinking mode %q requires a non-empty ThinkingEffort", ThinkingModeAdaptive)
+		}
+	case ThinkingModeEnabled:
+		if m.thinkingBudgetTokens <= 0 {
+			return anthropic.MessageNewParams{}, fmt.Errorf("anthropic: thinking mode %q requires ThinkingBudgetTokens > 0", ThinkingModeEnabled)
+		}
+	}
+
 	// Default max tokens (required by Anthropic API)
 	maxTokens := int64(4096)
 	if m.maxOutputTokens > 0 {
@@ -216,7 +337,16 @@ func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewP
 		MaxTokens: maxTokens,
 	}
 
-	if m.thinkingBudgetTokens > 0 {
+	// Reasoning: the resolved mode decides the on-the-wire shape.
+	//   - adaptive: the whole "thinking":{"type":"adaptive"} object plus
+	//     "output_config.effort" is injected as raw JSON at call time via
+	//     reasoningRequestOptions (the SDK's typed ThinkingConfigParamUnion
+	//     has no "adaptive" variant, only enabled/disabled). Opus 4.5+
+	//     require this and reject the classic "enabled" form, so we set
+	//     nothing on params.Thinking here.
+	//   - enabled: set the classic "thinking":{"type":"enabled",
+	//     "budget_tokens":N} block (Claude 3.7 / Sonnet 4 / Opus 4).
+	if m.resolveThinkingMode() == ThinkingModeEnabled && m.thinkingBudgetTokens > 0 {
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfEnabled: &anthropic.ThinkingConfigEnabledParam{
 				BudgetTokens: int64(m.thinkingBudgetTokens),
@@ -320,6 +450,30 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 	var blocks []anthropic.ContentBlockParamUnion
 
 	for _, part := range content.Parts {
+		// Reasoning parts must be reconstructed as their dedicated block
+		// types and placed before tool_use, which is the order Anthropic
+		// expects when a turn carries both. A thought Part with non-empty
+		// Text is a normal thinking block (echo Text + signature); a
+		// thought Part with empty Text carries a redacted_thinking blob in
+		// ThoughtSignature. See convertResponse for the inverse mapping.
+		if part.Thought {
+			if part.Text != "" {
+				blocks = append(blocks, anthropic.ContentBlockParamUnion{
+					OfThinking: &anthropic.ThinkingBlockParam{
+						Thinking:  part.Text,
+						Signature: string(part.ThoughtSignature),
+					},
+				})
+			} else if len(part.ThoughtSignature) > 0 {
+				blocks = append(blocks, anthropic.ContentBlockParamUnion{
+					OfRedactedThinking: &anthropic.RedactedThinkingBlockParam{
+						Data: string(part.ThoughtSignature),
+					},
+				})
+			}
+			continue
+		}
+
 		if part.Text != "" {
 			blocks = append(blocks, anthropic.NewTextBlock(part.Text))
 		}
@@ -370,6 +524,26 @@ func (m *Model) convertResponse(resp *anthropic.Message) (*model.LLMResponse, er
 		switch variant := block.AsAny().(type) {
 		case anthropic.TextBlock:
 			content.Parts = append(content.Parts, &genai.Part{Text: variant.Text})
+		case anthropic.ThinkingBlock:
+			// Preserve the reasoning block AND its signature. Anthropic
+			// requires the thinking block (with signature) to be echoed back
+			// in the next request when the turn also contains tool_use, or
+			// the follow-up call is rejected. We carry it as a thought Part:
+			// Thought=true, Text=the reasoning, ThoughtSignature=signature.
+			content.Parts = append(content.Parts, &genai.Part{
+				Text:             variant.Thinking,
+				Thought:          true,
+				ThoughtSignature: []byte(variant.Signature),
+			})
+		case anthropic.RedactedThinkingBlock:
+			// Encrypted reasoning we cannot read but MUST echo back intact.
+			// Convention: a thought Part with empty Text and the opaque blob
+			// in ThoughtSignature marks a redacted_thinking block (vs. a
+			// normal thinking block, which always has non-empty Text).
+			content.Parts = append(content.Parts, &genai.Part{
+				Thought:          true,
+				ThoughtSignature: []byte(variant.Data),
+			})
 		case anthropic.ToolUseBlock:
 			content.Parts = append(content.Parts, &genai.Part{
 				FunctionCall: &genai.FunctionCall{

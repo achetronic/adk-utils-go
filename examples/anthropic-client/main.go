@@ -21,7 +21,9 @@
 //	ANTHROPIC_API_KEY        - Anthropic API key (required)
 //	MODEL_NAME               - Model to use (default: claude-sonnet-4-5-20250929)
 //	MAX_OUTPUT_TOKENS        - Max output tokens (default: 4096)
-//	THINKING_BUDGET_TOKENS   - Output tokens reserved for extended thinking; 0 disables it (default: 0)
+//	THINKING_BUDGET_TOKENS   - Classic ("enabled") API: output tokens reserved for thinking; 0 disables it (default: 0)
+//	THINKING_EFFORT          - Adaptive ("adaptive") API for Opus 4.5+: low|medium|high; empty disables it
+//	THINKING_MODE            - Force the reasoning API: enabled | adaptive (default: empty = auto-deduce)
 
 package main
 
@@ -51,10 +53,16 @@ func main() {
 	// 1. Create the Anthropic client
 	//    This is all you need to switch from Gemini to Anthropic
 	llmModel := genaianthropic.New(genaianthropic.Config{
-		APIKey:               os.Getenv("ANTHROPIC_API_KEY"),
-		ModelName:            getEnvOrDefault("MODEL_NAME", "claude-sonnet-4-5-20250929"),
-		MaxOutputTokens:      getEnvInt("MAX_OUTPUT_TOKENS", 0),
+		APIKey:          os.Getenv("ANTHROPIC_API_KEY"),
+		ModelName:       getEnvOrDefault("MODEL_NAME", "claude-sonnet-4-5-20250929"),
+		MaxOutputTokens: getEnvInt("MAX_OUTPUT_TOKENS", 0),
+		// Reasoning has two APIs, picked per model (see README):
+		//   - classic budget-based ("enabled"): set THINKING_BUDGET_TOKENS
+		//   - effort-based adaptive ("adaptive", Opus 4.5+): set THINKING_EFFORT
+		// ThinkingMode forces the API; empty auto-deduces from the field set.
 		ThinkingBudgetTokens: getEnvInt("THINKING_BUDGET_TOKENS", 0),
+		ThinkingEffort:       os.Getenv("THINKING_EFFORT"),
+		ThinkingMode:         os.Getenv("THINKING_MODE"),
 	})
 
 	// 2. Create an agent using the Anthropic model

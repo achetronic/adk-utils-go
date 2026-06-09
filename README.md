@@ -79,18 +79,35 @@ agent, _ := llmagent.New(llmagent.Config{
 })
 ```
 
-#### Extended Thinking
+#### Extended Thinking (reasoning)
 
-Claude can generate an internal reasoning chain before producing its final response. Thinking tokens are **output tokens** — Claude writes the reasoning as text (it just isn't shown to the user). Set `ThinkingBudgetTokens` to reserve a portion of the output budget for this reasoning. The remaining tokens (`MaxOutputTokens - ThinkingBudgetTokens`) are available for the final response.
+Claude can produce an internal reasoning chain before its final answer. There are **two reasoning APIs**, and Anthropic rejects the wrong one with an HTTP 400, so you pick per model with `ThinkingMode`:
+
+- **Classic (`"enabled"`)**: budget-based. Reasoning tokens count as output tokens, so `ThinkingBudgetTokens` must be `>= 1024` and strictly less than `MaxOutputTokens`. Accepted by Claude 3.7, Sonnet 4 and Opus 4.
+- **Adaptive (`"adaptive"`)**: effort-based. Set `ThinkingEffort` to `"low"`, `"medium"` or `"high"` (some models also accept `"xhigh"` / `"max"`). Required by Opus 4.5 and newer, which reject the classic form.
+
+`ThinkingMode` is optional. Leave it empty and the client deduces the API from the field you set: `ThinkingEffort` set means adaptive; otherwise a `ThinkingBudgetTokens > 0` means enabled.
 
 ```go
+// Classic budget-based API (Claude 3.7 / Sonnet 4 / Opus 4)
 llmModel := genaianthropic.New(genaianthropic.Config{
     APIKey:               os.Getenv("ANTHROPIC_API_KEY"),
-    ModelName:            "claude-sonnet-4-5-20250929",
+    ModelName:            "claude-sonnet-4-20250514",
+    ThinkingMode:         genaianthropic.ThinkingModeEnabled, // optional; deduced from the budget
     MaxOutputTokens:      16000,
     ThinkingBudgetTokens: 10000, // must be >= 1024 and < MaxOutputTokens
 })
+
+// Effort-based adaptive API (Opus 4.5+)
+llmModel = genaianthropic.New(genaianthropic.Config{
+    APIKey:         os.Getenv("ANTHROPIC_API_KEY"),
+    ModelName:      "claude-opus-4-8",
+    ThinkingMode:   genaianthropic.ThinkingModeAdaptive, // optional; deduced from the effort
+    ThinkingEffort: "high",
+})
 ```
+
+When streaming, the reasoning is emitted as partial content parts flagged `Thought: true`, and the thinking block (with its signature) is preserved across turns so tool-use loops keep working.
 
 ### Custom HTTP Headers
 
@@ -119,7 +136,7 @@ Both clients support:
 - Tool/function calling
 - Image inputs (base64)
 - Temperature, TopP, MaxOutputTokens, StopSequences
-- Extended thinking (`ThinkingBudgetTokens`)
+- Extended thinking: classic budget API (`ThinkingBudgetTokens`) and adaptive effort API (`ThinkingEffort` + `ThinkingMode`)
 - Usage metadata
 - Custom HTTP headers (multi-value)
 
