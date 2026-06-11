@@ -50,6 +50,7 @@ type Model struct {
 	thinkingBudgetTokens int
 	thinkingEffort       string
 	thinkingMode         string
+	disablePromptCaching bool
 }
 
 // Reasoning API mode identifiers. They select which on-the-wire shape
@@ -131,6 +132,14 @@ type Config struct {
 	// HTTPOptions carries optional HTTP-level overrides, such as extra
 	// request headers.
 	HTTPOptions HTTPOptions
+
+	// DisablePromptCaching turns OFF the cache_control breakpoints the
+	// adapter stamps on every request (see caching.go). Caching is on
+	// by default because it only ever lowers the bill: requests whose
+	// prefix is below Anthropic's minimum cacheable length are simply
+	// not cached, with no error and no extra cost. Disable it only for
+	// proxies/gateways that reject the cache_control field.
+	DisablePromptCaching bool
 }
 
 // New creates an Anthropic client from config (API key, base URL, model name).
@@ -158,6 +167,7 @@ func New(cfg Config) *Model {
 		thinkingBudgetTokens: cfg.ThinkingBudgetTokens,
 		thinkingEffort:       cfg.ThinkingEffort,
 		thinkingMode:         cfg.ThinkingMode,
+		disablePromptCaching: cfg.DisablePromptCaching,
 	}
 }
 
@@ -438,6 +448,13 @@ func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewP
 				}
 			}
 		}
+	}
+
+	// Prompt caching: stamp the cache_control breakpoints LAST so every
+	// section (system, tools, repaired messages) is in its final shape.
+	// See caching.go for the breakpoint strategy.
+	if !m.disablePromptCaching {
+		applyCacheControl(&params)
 	}
 
 	return params, nil
