@@ -445,21 +445,23 @@ func (s *enrichedSpan) Attributes() []attribute.KeyValue {
 	return append(s.ReadOnlySpan.Attributes(), s.extra...)
 }
 
-func (s *enrichedSpan) Name() string                               { return s.ReadOnlySpan.Name() }
-func (s *enrichedSpan) SpanContext() oteltrace.SpanContext          { return s.ReadOnlySpan.SpanContext() }
-func (s *enrichedSpan) Parent() oteltrace.SpanContext               { return s.ReadOnlySpan.Parent() }
-func (s *enrichedSpan) SpanKind() oteltrace.SpanKind                { return s.ReadOnlySpan.SpanKind() }
-func (s *enrichedSpan) StartTime() time.Time                        { return s.ReadOnlySpan.StartTime() }
-func (s *enrichedSpan) EndTime() time.Time                          { return s.ReadOnlySpan.EndTime() }
-func (s *enrichedSpan) Events() []sdktrace.Event                    { return s.ReadOnlySpan.Events() }
-func (s *enrichedSpan) Links() []sdktrace.Link                      { return s.ReadOnlySpan.Links() }
-func (s *enrichedSpan) Status() sdktrace.Status                     { return s.ReadOnlySpan.Status() }
-func (s *enrichedSpan) Resource() *resource.Resource                { return s.ReadOnlySpan.Resource() }
-func (s *enrichedSpan) DroppedAttributes() int                      { return s.ReadOnlySpan.DroppedAttributes() }
-func (s *enrichedSpan) DroppedEvents() int                          { return s.ReadOnlySpan.DroppedEvents() }
-func (s *enrichedSpan) DroppedLinks() int                           { return s.ReadOnlySpan.DroppedLinks() }
-func (s *enrichedSpan) ChildSpanCount() int                         { return s.ReadOnlySpan.ChildSpanCount() }
-func (s *enrichedSpan) InstrumentationScope() instrumentation.Scope { return s.ReadOnlySpan.InstrumentationScope() }
+func (s *enrichedSpan) Name() string                       { return s.ReadOnlySpan.Name() }
+func (s *enrichedSpan) SpanContext() oteltrace.SpanContext { return s.ReadOnlySpan.SpanContext() }
+func (s *enrichedSpan) Parent() oteltrace.SpanContext      { return s.ReadOnlySpan.Parent() }
+func (s *enrichedSpan) SpanKind() oteltrace.SpanKind       { return s.ReadOnlySpan.SpanKind() }
+func (s *enrichedSpan) StartTime() time.Time               { return s.ReadOnlySpan.StartTime() }
+func (s *enrichedSpan) EndTime() time.Time                 { return s.ReadOnlySpan.EndTime() }
+func (s *enrichedSpan) Events() []sdktrace.Event           { return s.ReadOnlySpan.Events() }
+func (s *enrichedSpan) Links() []sdktrace.Link             { return s.ReadOnlySpan.Links() }
+func (s *enrichedSpan) Status() sdktrace.Status            { return s.ReadOnlySpan.Status() }
+func (s *enrichedSpan) Resource() *resource.Resource       { return s.ReadOnlySpan.Resource() }
+func (s *enrichedSpan) DroppedAttributes() int             { return s.ReadOnlySpan.DroppedAttributes() }
+func (s *enrichedSpan) DroppedEvents() int                 { return s.ReadOnlySpan.DroppedEvents() }
+func (s *enrichedSpan) DroppedLinks() int                  { return s.ReadOnlySpan.DroppedLinks() }
+func (s *enrichedSpan) ChildSpanCount() int                { return s.ReadOnlySpan.ChildSpanCount() }
+func (s *enrichedSpan) InstrumentationScope() instrumentation.Scope {
+	return s.ReadOnlySpan.InstrumentationScope()
+}
 func (s *enrichedSpan) InstrumentationLibrary() instrumentation.Scope {
 	return s.ReadOnlySpan.InstrumentationLibrary()
 }

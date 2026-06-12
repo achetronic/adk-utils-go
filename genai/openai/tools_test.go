@@ -142,11 +142,11 @@ func TestConvertTools(t *testing.T) {
 // the user's attachment.
 func TestConvertInlineDataToPart(t *testing.T) {
 	cases := []struct {
-		name      string
-		mime      string
-		data      []byte
-		wantKind  string
-		wantErr   bool
+		name       string
+		mime       string
+		data       []byte
+		wantKind   string
+		wantErr    bool
 		extraCheck func(t *testing.T, mime string, data []byte, p any)
 	}{
 		{

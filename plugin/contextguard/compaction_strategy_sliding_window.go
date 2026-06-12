@@ -28,11 +28,11 @@ import (
 // all but a small recent window (30% of maxTurns, minimum 3) are summarized
 // and replaced with a single summary message.
 type slidingWindowStrategy struct {
-	registry    ModelRegistry
-	llm         model.LLM
-	maxTurns    int
+	registry              ModelRegistry
+	llm                   model.LLM
+	maxTurns              int
 	maxCompactionAttempts int
-	mu          sync.Mutex
+	mu                    sync.Mutex
 }
 
 const recentKeepRatio = 0.30
@@ -40,9 +40,9 @@ const recentKeepRatio = 0.30
 // newSlidingWindowStrategy creates a sliding window strategy for a single agent.
 func newSlidingWindowStrategy(registry ModelRegistry, llm model.LLM, maxTurns int, maxCompactionAttempts int) *slidingWindowStrategy {
 	return &slidingWindowStrategy{
-		registry:    registry,
-		llm:         llm,
-		maxTurns:    maxTurns,
+		registry:              registry,
+		llm:                   llm,
+		maxTurns:              maxTurns,
 		maxCompactionAttempts: maxCompactionAttempts,
 	}
 }

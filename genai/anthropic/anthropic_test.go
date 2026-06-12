@@ -134,4 +134,3 @@ func TestBuildMessageParams_ToolChoice(t *testing.T) {
 		})
 	}
 }
-

@@ -34,20 +34,20 @@ import (
 // Compaction always produces a full summary (no recent tail preserved),
 // matching Crush CLI behaviour. The result is [summary] + [continuation].
 type thresholdStrategy struct {
-	registry    ModelRegistry
-	llm         model.LLM
-	maxTokens   int
+	registry              ModelRegistry
+	llm                   model.LLM
+	maxTokens             int
 	maxCompactionAttempts int
-	mu          sync.Mutex
+	mu                    sync.Mutex
 }
 
 // newThresholdStrategy creates a threshold strategy. If maxTokens > 0 it
 // overrides the registry lookup for the context window size.
 func newThresholdStrategy(registry ModelRegistry, llm model.LLM, maxTokens int, maxCompactionAttempts int) *thresholdStrategy {
 	return &thresholdStrategy{
-		registry:    registry,
-		llm:         llm,
-		maxTokens:   maxTokens,
+		registry:              registry,
+		llm:                   llm,
+		maxTokens:             maxTokens,
 		maxCompactionAttempts: maxCompactionAttempts,
 	}
 }

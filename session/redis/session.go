@@ -29,9 +29,9 @@ import (
 
 // RedisSessionService implements session.Service using Redis as the backend.
 type RedisSessionService struct {
-	client      *redis.Client
-	ttl         time.Duration
-	appStateTTL time.Duration
+	client       *redis.Client
+	ttl          time.Duration
+	appStateTTL  time.Duration
 	userStateTTL time.Duration
 }
 

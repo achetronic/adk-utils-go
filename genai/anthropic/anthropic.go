@@ -68,6 +68,7 @@ const (
 
 // HTTPOptions holds optional HTTP-level configuration for the Anthropic client.
 type HTTPOptions struct {
+	Client  *http.Client
 	Headers http.Header
 }
 
@@ -151,6 +152,9 @@ func New(cfg Config) *Model {
 	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	}
+	if cfg.HTTPOptions.Client != nil {
+		opts = append(opts, option.WithHTTPClient(cfg.HTTPOptions.Client))
 	}
 	for k, vals := range cfg.HTTPOptions.Headers {
 		for _, v := range vals {

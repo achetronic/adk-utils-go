@@ -107,9 +107,9 @@ type Strategy interface {
 type AgentOption func(*agentConfig)
 
 type agentConfig struct {
-	strategy    string
-	maxTurns    int
-	maxTokens   int
+	strategy              string
+	maxTurns              int
+	maxTokens             int
 	maxCompactionAttempts int
 }
 

@@ -80,16 +80,16 @@ func newMockCallbackContext(agentName string) *mockCallbackContext {
 	}
 }
 
-func (m *mockCallbackContext) UserContent() *genai.Content            { return nil }
-func (m *mockCallbackContext) InvocationID() string                   { return "inv-1" }
-func (m *mockCallbackContext) AgentName() string                      { return m.agentName }
-func (m *mockCallbackContext) ReadonlyState() session.ReadonlyState   { return m.state }
-func (m *mockCallbackContext) UserID() string                         { return "user-1" }
-func (m *mockCallbackContext) AppName() string                        { return "test-app" }
-func (m *mockCallbackContext) SessionID() string                      { return m.sessionID }
-func (m *mockCallbackContext) Branch() string                         { return "" }
-func (m *mockCallbackContext) Artifacts() agent.Artifacts             { return &mockArtifacts{} }
-func (m *mockCallbackContext) State() session.State                   { return m.state }
+func (m *mockCallbackContext) UserContent() *genai.Content          { return nil }
+func (m *mockCallbackContext) InvocationID() string                 { return "inv-1" }
+func (m *mockCallbackContext) AgentName() string                    { return m.agentName }
+func (m *mockCallbackContext) ReadonlyState() session.ReadonlyState { return m.state }
+func (m *mockCallbackContext) UserID() string                       { return "user-1" }
+func (m *mockCallbackContext) AppName() string                      { return "test-app" }
+func (m *mockCallbackContext) SessionID() string                    { return m.sessionID }
+func (m *mockCallbackContext) Branch() string                       { return "" }
+func (m *mockCallbackContext) Artifacts() agent.Artifacts           { return &mockArtifacts{} }
+func (m *mockCallbackContext) State() session.State                 { return m.state }
 
 type mockArtifacts struct{}
 
