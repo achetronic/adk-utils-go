@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/achetronic/adk-utils-go/genai/common"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
@@ -402,7 +403,7 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 	for _, part := range content.Parts {
 		switch {
 		case part.FunctionResponse != nil:
-			responseJSON, err := json.Marshal(part.FunctionResponse.Response)
+			responseJSON, err := common.MarshalToolPayload(part.FunctionResponse.Response)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)
 			}
@@ -410,7 +411,7 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 			messages = append(messages, openai.ToolMessage(string(responseJSON), normalizedID))
 
 		case part.FunctionCall != nil:
-			argsJSON, err := json.Marshal(part.FunctionCall.Args)
+			argsJSON, err := common.MarshalToolPayload(part.FunctionCall.Args)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function args: %w", err)
 			}
