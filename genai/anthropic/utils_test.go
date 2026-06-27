@@ -68,38 +68,6 @@ func TestConvertStopReason(t *testing.T) {
 	}
 }
 
-// convertToolInputToRaw guards the wire format we send for tool_use.input.
-// Anthropic requires a JSON object literal — never null, never an empty
-// payload — so we always normalise to "{}" when the caller hands us nil,
-// empty, or null-marshaling values. Anything that already round-trips as
-// valid JSON is passed through verbatim to avoid losing precision.
-func TestConvertToolInputToRaw(t *testing.T) {
-	cases := []struct {
-		name  string
-		input any
-		want  string
-	}{
-		{"nil", nil, "{}"},
-		{"nil typed map", (map[string]any)(nil), "{}"},
-		{"empty map", map[string]any{}, "{}"},
-		{"populated map", map[string]any{"k": "v"}, `{"k":"v"}`},
-		{"empty raw message falls back to default", json.RawMessage(""), "{}"},
-		{"raw message passes through", json.RawMessage(`{"a":1}`), `{"a":1}`},
-		{"struct gets marshaled", struct {
-			Foo string `json:"foo"`
-		}{Foo: "bar"}, `{"foo":"bar"}`},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := string(convertToolInputToRaw(c.input))
-			if got != c.want {
-				t.Errorf("convertToolInputToRaw() = %q, want %q", got, c.want)
-			}
-		})
-	}
-}
-
 // convertToolInput is the inverse direction: raw payloads coming back from the
 // model get normalised into a Go map for genai.FunctionCall.Args. We assert on
 // equivalence (reflect.DeepEqual) instead of byte-for-byte JSON because the

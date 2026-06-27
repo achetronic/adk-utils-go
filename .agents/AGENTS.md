@@ -2,6 +2,11 @@
 
 Agent guidelines for working in the `adk-utils-go` repository.
 
+> Companion docs in `.agents/`: [DECISIONS.md](./DECISIONS.md) (per-provider
+> design decisions and their rationale) and [TODOS.md](./TODOS.md) (deferred
+> work and open review questions). Read DECISIONS.md before changing the
+> `genai/*` adapters: several behaviours there are deliberate and load-bearing.
+
 ## Project Overview
 
 A Go library providing utilities for Google's Agent Development Kit (ADK). This library extends ADK with additional backend implementations for topics like session management or memory services.
@@ -114,8 +119,9 @@ adk-utils-go/
 
 | Package               | Description                                                                                                       |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `genai/openai`        | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)  |
+| `genai/common`        | Helpers shared by the LLM adapters so cross-provider wire rules are implemented once (e.g. `MarshalToolPayload`)  |
 | `genai/anthropic`     | Anthropic Claude `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)          |
+| `genai/openai`        | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)  |
 | `session/redis`       | Redis-backed implementation of `session.Service`                                                                  |
 | `memory/memorytypes`  | Shared types (`EntryWithID`) and interfaces (`MemoryService`, `ExtendedMemoryService`)                            |
 | `memory/postgres`     | PostgreSQL+pgvector implementation of `memory.Service` and `ExtendedMemoryService`                                |
@@ -394,3 +400,13 @@ The multi-name fallback is a pragmatic choice: neither provider accepts a list o
 ### Tests
 
 Each adapter has a table-driven test (`openai_test.go` / `anthropic_test.go`) covering the seven relevant combinations (three modes, two branches of `AllowedFunctionNames`, two "leave it unset" paths). The Anthropic test asserts on the discriminated-union variant (`OfAuto` / `OfAny` / `OfTool` / `OfNone`) rather than the nested `Type` field because the SDK uses `shared/constant` single-value string types whose in-memory zero is `""` — the discriminator is injected during marshaling, and the variant pointer is what the marshaler keys off of.
+
+## LLM Adapters: empty tool payloads serialise to `{}`, never `null`
+
+A tool with no parameters (e.g. `exit_loop`) leaves `genai.FunctionCall.Args` nil, and a tool that returns nothing leaves `genai.FunctionResponse.Response` nil. `json.Marshal` of a nil Go map produces the literal `"null"`. On the wire, a tool call's `arguments` and a tool message's content are JSON-object strings; `"null"` is not an object, and strict server-side parsers on OpenAI-compatible backends reject it (Qwen's chat template on vLLM/llama.cpp raises a Jinja error). The official OpenAI endpoint and Anthropic both tolerate `"null"`, so this is _portability for strict OpenAI-compatible runtimes_, not an API requirement. The canonical empty payload is `{}`.
+
+Because this is a provider wire-schema rule, it lives in the adapters (consumers must not have to scrub their `genai.Content`):
+
+- `genai/openai` and `genai/anthropic` both route `FunctionCall.Args` and `FunctionResponse.Response` through `common.MarshalToolPayload` (in the `genai/common` package), which performs the `null`/empty → `{}` normalisation once for both providers, propagates a genuine marshal error, and never mutates the input. Keeping it in one place is what guarantees tool_use and tool_result stay symmetric and the two adapters stay interchangeable (D5).
+
+Coverage: `genai/common/payload_test.go` pins the helper's unit contract; each adapter's `tool_payload_test.go` pins the integration, including a canary that fails if a future change "fixes" the nil payload by mutating the shared input in place. Full rationale and the per-provider decision list are in [DECISIONS.md](./DECISIONS.md) (decision D1).
