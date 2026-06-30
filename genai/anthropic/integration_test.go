@@ -1,12 +1,7 @@
 //go:build integration
 
-// Copyright 2025 achetronic
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
+// SPDX-License-Identifier: Apache-2.0
 
 // Excluded from the default `go test ./...`. Build with `-tags=integration`.
 // Two escalating steps, same as the OpenAI adapter:

@@ -1,12 +1,7 @@
 //go:build integration
 
-// Copyright 2025 achetronic
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
+// SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
+// SPDX-License-Identifier: Apache-2.0
 
 // These tests cover the cross-message semantic rules the Anthropic API enforces
 // but no JSON schema expresses, discovered by probing the live API. Each test
