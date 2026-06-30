@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
+# SPDX-License-Identifier: Apache-2.0
+
 # Re-pin the upstream OpenAPI specs used by the schema-validation step of the
 # integration tests. Run it by hand when you want to validate against newer
 # specs; the committed copies are what tests use, so nothing changes until you
