@@ -19,8 +19,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
 )
 
 // slidingWindowStrategy implements turn-count-based compaction. When the
@@ -58,7 +58,7 @@ func (s *slidingWindowStrategy) Name() string {
 // window, it retries with a progressively smaller recent window (up to
 // maxCompactionAttempts). Otherwise it injects the existing summary
 // (if any) and returns without touching the conversation.
-func (s *slidingWindowStrategy) Compact(ctx agent.CallbackContext, req *model.LLMRequest) error {
+func (s *slidingWindowStrategy) Compact(ctx agent.Context, req *model.LLMRequest) error {
 	existingSummary := loadSummary(ctx)
 	contentsAtLastCompaction := loadContentsAtCompaction(ctx)
 

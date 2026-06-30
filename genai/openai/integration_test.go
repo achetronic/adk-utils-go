@@ -32,7 +32,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers"
 	"github.com/getkin/kin-openapi/routers/gorillamux"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
 

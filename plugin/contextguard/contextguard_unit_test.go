@@ -23,10 +23,10 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ func (s *mockState) All() iter.Seq2[string, any] {
 }
 
 type mockCallbackContext struct {
-	context.Context
+	agent.StrictContextMock
 	agentName string
 	sessionID string
 	state     session.State
@@ -73,10 +73,10 @@ type mockCallbackContext struct {
 
 func newMockCallbackContext(agentName string) *mockCallbackContext {
 	return &mockCallbackContext{
-		Context:   context.Background(),
-		agentName: agentName,
-		sessionID: "test-session",
-		state:     newMockState(),
+		StrictContextMock: agent.StrictContextMock{Ctx: context.Background()},
+		agentName:         agentName,
+		sessionID:         "test-session",
+		state:             newMockState(),
 	}
 }
 
@@ -90,6 +90,8 @@ func (m *mockCallbackContext) SessionID() string                    { return m.s
 func (m *mockCallbackContext) Branch() string                       { return "" }
 func (m *mockCallbackContext) Artifacts() agent.Artifacts           { return &mockArtifacts{} }
 func (m *mockCallbackContext) State() session.State                 { return m.state }
+
+var _ agent.Context = (*mockCallbackContext)(nil)
 
 type mockArtifacts struct{}
 
@@ -759,10 +761,10 @@ func TestPersistAndLoadSummary(t *testing.T) {
 func TestLoadSummary_AgentNameSuffix(t *testing.T) {
 	ctx1 := newMockCallbackContext("agent1")
 	ctx2 := &mockCallbackContext{
-		Context:   context.Background(),
-		agentName: "agent2",
-		sessionID: "test-session",
-		state:     ctx1.state,
+		StrictContextMock: agent.StrictContextMock{Ctx: context.Background()},
+		agentName:         "agent2",
+		sessionID:         "test-session",
+		state:             ctx1.state,
 	}
 
 	persistSummary(ctx1, "summary for agent1", 1000)
@@ -1843,10 +1845,10 @@ func TestThresholdStrategy_InjectsContinuation(t *testing.T) {
 	s := newThresholdStrategy(registry, llm, 0, defaultMaxCompactionAttempts)
 
 	ctx := &mockCallbackContext{
-		Context:   context.Background(),
-		agentName: "agent1",
-		sessionID: "test-session",
-		state:     newMockState(),
+		StrictContextMock: agent.StrictContextMock{Ctx: context.Background()},
+		agentName:         "agent1",
+		sessionID:         "test-session",
+		state:             newMockState(),
 	}
 
 	req := &model.LLMRequest{

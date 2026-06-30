@@ -18,8 +18,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
 )
 
 // thresholdStrategy implements token-based compaction. It estimates total
@@ -62,7 +62,7 @@ func (s *thresholdStrategy) Name() string {
 // rewrites req.Contents to [summary] + [continuation instruction].
 //
 // Token source priority: calibrated heuristic > stale real tokens > raw heuristic.
-func (s *thresholdStrategy) Compact(ctx agent.CallbackContext, req *model.LLMRequest) error {
+func (s *thresholdStrategy) Compact(ctx agent.Context, req *model.LLMRequest) error {
 	var contextWindow int
 	if s.maxTokens > 0 {
 		contextWindow = s.maxTokens

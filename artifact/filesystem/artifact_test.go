@@ -18,7 +18,7 @@ import (
 	"context"
 	"testing"
 
-	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/genai"
 )
 

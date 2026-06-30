@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/v2/session"
 )
 
 // RedisSessionService implements session.Service using Redis as the backend.
@@ -430,7 +430,7 @@ func unmarshalHashFields(fields map[string]string) map[string]any {
 }
 
 // extractStateDeltas splits a flat state map into three separate maps based on
-// key prefixes, mirroring google.golang.org/adk/internal/sessionutils.ExtractStateDeltas.
+// key prefixes, mirroring google.golang.org/adk/v2/internal/sessionutils.ExtractStateDeltas.
 // Keys with the "temp:" prefix are discarded.
 func extractStateDeltas(delta map[string]any) (appDelta, userDelta, sessionDelta map[string]any) {
 	appDelta = make(map[string]any)
@@ -465,7 +465,7 @@ func extractSingleKey(key string, value any) (app, user, sessionOnly map[string]
 
 // mergeStates combines app, user, and session state maps into a single flat map,
 // re-adding the appropriate prefixes, mirroring
-// google.golang.org/adk/internal/sessionutils.MergeStates.
+// google.golang.org/adk/v2/internal/sessionutils.MergeStates.
 func mergeStates(appState, userState, sessionState map[string]any) map[string]any {
 	totalSize := len(appState) + len(userState) + len(sessionState)
 	merged := make(map[string]any, totalSize)
