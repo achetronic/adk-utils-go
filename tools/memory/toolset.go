@@ -20,12 +20,12 @@ import (
 	"time"
 
 	"github.com/achetronic/adk-utils-go/memory/memorytypes"
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -152,7 +152,7 @@ type Entry struct {
 }
 
 // searchMemory searches the long-term memory.
-func (ts *Toolset) searchMemory(ctx tool.Context, args SearchArgs) (SearchResult, error) {
+func (ts *Toolset) searchMemory(ctx agent.Context, args SearchArgs) (SearchResult, error) {
 	if args.Query == "" {
 		return SearchResult{}, fmt.Errorf("query cannot be empty")
 	}
@@ -227,7 +227,7 @@ type SaveResult struct {
 }
 
 // saveToMemory saves information to long-term memory.
-func (ts *Toolset) saveToMemory(ctx tool.Context, args SaveArgs) (SaveResult, error) {
+func (ts *Toolset) saveToMemory(ctx agent.Context, args SaveArgs) (SaveResult, error) {
 	if args.Content == "" {
 		return SaveResult{
 			Success: false,
@@ -272,7 +272,7 @@ type UpdateResult struct {
 }
 
 // updateMemory updates an existing memory entry.
-func (ts *Toolset) updateMemory(ctx tool.Context, args UpdateArgs) (UpdateResult, error) {
+func (ts *Toolset) updateMemory(ctx agent.Context, args UpdateArgs) (UpdateResult, error) {
 	if args.ID == 0 {
 		return UpdateResult{
 			Success: false,
@@ -312,7 +312,7 @@ type DeleteResult struct {
 }
 
 // deleteMemory deletes a memory entry.
-func (ts *Toolset) deleteMemory(ctx tool.Context, args DeleteArgs) (DeleteResult, error) {
+func (ts *Toolset) deleteMemory(ctx agent.Context, args DeleteArgs) (DeleteResult, error) {
 	if args.ID == 0 {
 		return DeleteResult{
 			Success: false,

@@ -43,12 +43,12 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/runner"
-	adktelemetry "google.golang.org/adk/telemetry"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
+	adktelemetry "google.golang.org/adk/v2/telemetry"
 	"google.golang.org/genai"
 )
 
@@ -190,7 +190,7 @@ type spanEnricher struct {
 
 // branchKey builds the map key that isolates parallel branches. In
 // sequential flows Branch() returns "" and the key equals the invocationID.
-func branchKey(ctx agent.CallbackContext) string {
+func branchKey(ctx agent.Context) string {
 	if b := ctx.Branch(); b != "" {
 		return ctx.InvocationID() + ":" + b
 	}
@@ -213,7 +213,7 @@ func newSpanEnricher() *spanEnricher {
 //
 // In a ParallelAgent flow each sub-agent gets a distinct branch, so their
 // spans are tracked independently and never interleave.
-func (e *spanEnricher) beforeAgent(ctx agent.CallbackContext) (*genai.Content, error) {
+func (e *spanEnricher) beforeAgent(ctx agent.Context) (*genai.Content, error) {
 	span := oteltrace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return nil, nil
@@ -258,7 +258,7 @@ func (e *spanEnricher) beforeAgent(ctx agent.CallbackContext) (*genai.Content, e
 
 // afterAgent is the AfterAgentCallback. It pops the invoke_agent span from
 // the per-branch stack, cleaning up when the last span is removed.
-func (e *spanEnricher) afterAgent(ctx agent.CallbackContext) (*genai.Content, error) {
+func (e *spanEnricher) afterAgent(ctx agent.Context) (*genai.Content, error) {
 	key := branchKey(ctx)
 	e.mu.Lock()
 	stack := e.agentSpans[key]
@@ -280,7 +280,7 @@ func (e *spanEnricher) afterAgent(ctx agent.CallbackContext) (*genai.Content, er
 // visible to plugin callbacks). The enrichingExporter bridges the gap by
 // looking up pending calls via the parent span ID of each generate_content
 // span, which is the invoke_agent span ID stored here.
-func (e *spanEnricher) beforeModel(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (e *spanEnricher) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	span := oteltrace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return nil, nil
@@ -305,7 +305,7 @@ func (e *spanEnricher) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 // trace level. The check avoids resp.TurnComplete because that field is
 // only populated in streaming mode; instead it uses !Partial +
 // !hasFunctionCalls which works in both streaming and non-streaming flows.
-func (e *spanEnricher) afterModel(ctx agent.CallbackContext, resp *model.LLMResponse, llmErr error) (*model.LLMResponse, error) {
+func (e *spanEnricher) afterModel(ctx agent.Context, resp *model.LLMResponse, llmErr error) (*model.LLMResponse, error) {
 	span := oteltrace.SpanFromContext(ctx)
 	if !span.IsRecording() {
 		return nil, nil

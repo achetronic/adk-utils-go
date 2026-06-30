@@ -25,8 +25,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/genai"
 )
 
@@ -262,9 +263,9 @@ func (s *FilesystemService) GetArtifactVersion(_ context.Context, req *artifact.
 		mimeType = part.InlineData.MIMEType
 	}
 
-	var createTime float64
+	var createTime time.Time
 	if info, err := os.Stat(path); err == nil {
-		createTime = float64(info.ModTime().UnixNano()) / 1e9
+		createTime = info.ModTime()
 	}
 
 	return &artifact.GetArtifactVersionResponse{

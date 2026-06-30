@@ -23,8 +23,8 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
 )
 
 const summarizeSystemPrompt = `You are summarizing a conversation to preserve context for continuing later.
@@ -67,7 +67,7 @@ Length: A dynamic word limit will be appended to this prompt at runtime based on
 
 // loadSummary reads the running conversation summary from session state.
 // Returns an empty string if no summary has been stored yet.
-func loadSummary(ctx agent.CallbackContext) string {
+func loadSummary(ctx agent.Context) string {
 	key := stateKeyPrefixSummary + ctx.AgentName()
 	val, err := ctx.State().Get(key)
 	if err != nil {
@@ -79,7 +79,7 @@ func loadSummary(ctx agent.CallbackContext) string {
 
 // persistSummary writes the summary and a diagnostic token count to session
 // state. Errors are logged but not propagated.
-func persistSummary(ctx agent.CallbackContext, summary string, tokenCount int) {
+func persistSummary(ctx agent.Context, summary string, tokenCount int) {
 	keySummary := stateKeyPrefixSummary + ctx.AgentName()
 	keySummarizedAt := stateKeyPrefixSummarizedAt + ctx.AgentName()
 	if err := ctx.State().Set(keySummary, summary); err != nil {
@@ -92,7 +92,7 @@ func persistSummary(ctx agent.CallbackContext, summary string, tokenCount int) {
 
 // loadContentsAtCompaction reads the Content count recorded at the last
 // sliding-window compaction. Returns 0 if no compaction has happened yet.
-func loadContentsAtCompaction(ctx agent.CallbackContext) int {
+func loadContentsAtCompaction(ctx agent.Context) int {
 	key := stateKeyPrefixContentsAtCompaction + ctx.AgentName()
 	val, err := ctx.State().Get(key)
 	if err != nil {
@@ -112,7 +112,7 @@ func loadContentsAtCompaction(ctx agent.CallbackContext) int {
 
 // persistContentsAtCompaction records the total Content count at which
 // compaction was performed, so the next call can compute turns since then.
-func persistContentsAtCompaction(ctx agent.CallbackContext, count int) {
+func persistContentsAtCompaction(ctx agent.Context, count int) {
 	key := stateKeyPrefixContentsAtCompaction + ctx.AgentName()
 	if err := ctx.State().Set(key, count); err != nil {
 		slog.Warn("ContextGuard: failed to persist contents count", "error", err)
@@ -121,7 +121,7 @@ func persistContentsAtCompaction(ctx agent.CallbackContext, count int) {
 
 // persistRealTokens writes the real token count from the provider to session
 // state. Called by the AfterModelCallback.
-func persistRealTokens(ctx agent.CallbackContext, tokens int) {
+func persistRealTokens(ctx agent.Context, tokens int) {
 	key := stateKeyPrefixRealTokens + ctx.AgentName()
 	if err := ctx.State().Set(key, tokens); err != nil {
 		slog.Warn("ContextGuard: failed to persist real token count", "error", err)
@@ -130,7 +130,7 @@ func persistRealTokens(ctx agent.CallbackContext, tokens int) {
 
 // loadRealTokens reads the real token count from session state. Returns 0 if
 // no count has been recorded yet (first turn or provider doesn't report usage).
-func loadRealTokens(ctx agent.CallbackContext) int {
+func loadRealTokens(ctx agent.Context) int {
 	key := stateKeyPrefixRealTokens + ctx.AgentName()
 	val, err := ctx.State().Get(key)
 	if err != nil {
@@ -151,7 +151,7 @@ func loadRealTokens(ctx agent.CallbackContext) int {
 // persistLastHeuristic writes the heuristic token estimate of the request
 // that was sent to the LLM. Called by beforeModel AFTER compaction so it
 // reflects the final request. Used to compute a calibration factor.
-func persistLastHeuristic(ctx agent.CallbackContext, tokens int) {
+func persistLastHeuristic(ctx agent.Context, tokens int) {
 	key := stateKeyPrefixLastHeuristic + ctx.AgentName()
 	if err := ctx.State().Set(key, tokens); err != nil {
 		slog.Warn("ContextGuard: failed to persist last heuristic", "error", err)
@@ -160,7 +160,7 @@ func persistLastHeuristic(ctx agent.CallbackContext, tokens int) {
 
 // loadLastHeuristic reads the heuristic estimate from the previous LLM call.
 // Returns 0 if not yet recorded.
-func loadLastHeuristic(ctx agent.CallbackContext) int {
+func loadLastHeuristic(ctx agent.Context) int {
 	key := stateKeyPrefixLastHeuristic + ctx.AgentName()
 	val, err := ctx.State().Get(key)
 	if err != nil {
@@ -182,7 +182,7 @@ func loadLastHeuristic(ctx agent.CallbackContext) int {
 // session state. Called after compaction so the next turn starts fresh
 // instead of applying a stale correction factor derived from a much
 // larger pre-compaction request.
-func resetCalibration(ctx agent.CallbackContext) {
+func resetCalibration(ctx agent.Context) {
 	keyReal := stateKeyPrefixRealTokens + ctx.AgentName()
 	keyHeuristic := stateKeyPrefixLastHeuristic + ctx.AgentName()
 	if err := ctx.State().Set(keyReal, 0); err != nil {
@@ -225,7 +225,7 @@ func truncateForSummarizer(contents []*genai.Content, contextWindow int) []*gena
 //     tokens nor an inaccurate heuristic can cause an undercount.
 //  4. If no real tokens are available, fall back to the raw heuristic
 //     scaled by a conservative default factor.
-func tokenCount(ctx agent.CallbackContext, req *model.LLMRequest) int {
+func tokenCount(ctx agent.Context, req *model.LLMRequest) int {
 	currentHeuristic := estimateTokens(req)
 	realTokens := loadRealTokens(ctx)
 
@@ -285,7 +285,7 @@ type TodoItem struct {
 
 // loadTodos reads the todo list from session state. Returns nil if no todos
 // are stored. Supports both []TodoItem and []any (from JSON deserialization).
-func loadTodos(ctx agent.CallbackContext) []TodoItem {
+func loadTodos(ctx agent.Context) []TodoItem {
 	val, err := ctx.State().Get("todos")
 	if err != nil || val == nil {
 		return nil
