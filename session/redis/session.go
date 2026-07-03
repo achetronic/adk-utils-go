@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -151,6 +152,9 @@ func (s *RedisSessionService) Create(ctx context.Context, req *session.CreateReq
 
 // Get retrieves a session by ID.
 func (s *RedisSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
+		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
+	}
 	key := s.sessionKey(req.AppName, req.UserID, req.SessionID)
 
 	data, err := s.client.Get(ctx, key).Bytes()
@@ -216,29 +220,73 @@ func (s *RedisSessionService) Get(ctx context.Context, req *session.GetRequest) 
 	return &session.GetResponse{Session: sess}, nil
 }
 
-// List returns all sessions for a user.
+// List returns the sessions of a user, or of every user of the app when
+// UserID is empty, mirroring the in-memory service. Sessions are returned
+// without their events, also matching the reference behaviour.
 func (s *RedisSessionService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
-	indexKey := s.sessionsIndexKey(req.AppName, req.UserID)
-
-	sessionIDs, err := s.client.SMembers(ctx, indexKey).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list sessions: %w", err)
+	if req.AppName == "" {
+		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
 
-	var sessions []session.Session
-	for _, sessionID := range sessionIDs {
-		resp, err := s.Get(ctx, &session.GetRequest{
-			AppName:   req.AppName,
-			UserID:    req.UserID,
-			SessionID: sessionID,
-		})
+	keys, err := s.listSessionKeys(ctx, req.AppName, req.UserID)
+	if err != nil {
+		return nil, err
+	}
+
+	sessions := make([]session.Session, 0, len(keys))
+	for _, key := range keys {
+		data, err := s.client.Get(ctx, key).Bytes()
 		if err != nil {
 			continue
 		}
-		sessions = append(sessions, resp.Session)
+		var storable storableSession
+		if err := json.Unmarshal(data, &storable); err != nil {
+			continue
+		}
+
+		appState := s.loadAppState(ctx, storable.AppName)
+		userState := s.loadUserState(ctx, storable.AppName, storable.UserID)
+		mergedState := mergeStates(appState, userState, storable.State)
+
+		sessions = append(sessions, &redisSession{
+			id:             storable.ID,
+			appName:        storable.AppName,
+			userID:         storable.UserID,
+			state:          newRedisState(mergedState, s.client, key, s.ttl, s, storable.AppName, storable.UserID),
+			events:         newFilteredRedisEvents(nil),
+			lastUpdateTime: storable.LastUpdateTime,
+		})
 	}
 
 	return &session.ListResponse{Sessions: sessions}, nil
+}
+
+// listSessionKeys resolves the session keys to list: directly from the
+// per-user index when UserID is set, or by scanning the app's session key
+// space when it is not (the index sets are keyed per user).
+func (s *RedisSessionService) listSessionKeys(ctx context.Context, appName, userID string) ([]string, error) {
+	if userID != "" {
+		sessionIDs, err := s.client.SMembers(ctx, s.sessionsIndexKey(appName, userID)).Result()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list sessions: %w", err)
+		}
+		keys := make([]string, 0, len(sessionIDs))
+		for _, id := range sessionIDs {
+			keys = append(keys, s.sessionKey(appName, userID, id))
+		}
+		return keys, nil
+	}
+
+	var keys []string
+	pattern := fmt.Sprintf("session:%s:*", appName)
+	iter := s.client.Scan(ctx, 0, pattern, 100).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to scan sessions: %w", err)
+	}
+	return keys, nil
 }
 
 // Delete removes a session.
@@ -259,18 +307,30 @@ func (s *RedisSessionService) Delete(ctx context.Context, req *session.DeleteReq
 	return nil
 }
 
-// AppendEvent appends an event to a session and applies its StateDelta to the
-// persisted session state, matching the behaviour of the official ADK in-memory
-// and database session service implementations.
+// AppendEvent appends an event to a session and applies its StateDelta both to
+// the persisted session state and to the live session object, matching the
+// behaviour of the official ADK in-memory and database session service
+// implementations. Without the live-state update, later reads of the session
+// state within the same invocation would never observe deltas appended
+// earlier in that invocation.
 func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Session, evt *session.Event) error {
 	if evt.Partial {
 		return nil
 	}
 
-	evt.Timestamp = time.Now()
+	if evt.Timestamp.IsZero() {
+		evt.Timestamp = time.Now()
+	}
 	if evt.ID == "" {
 		evt.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
+
+	// The live state receives the delta BEFORE temp: keys are trimmed:
+	// temporary keys are invocation-scoped and must be readable for the rest
+	// of the invocation, they are only excluded from persistence. Mirrors the
+	// in-memory service, which updates session state and then trims the
+	// stored copy.
+	liveDelta := evt.Actions.StateDelta
 
 	trimTempStateDelta(evt)
 
@@ -321,7 +381,9 @@ func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Sess
 		}
 	}
 
-	storable.LastUpdateTime = time.Now()
+	// LastUpdateTime tracks the event timestamp, not the wall clock at
+	// persistence time, mirroring the in-memory service.
+	storable.LastUpdateTime = evt.Timestamp
 	updatedData, err := json.Marshal(storable)
 	if err != nil {
 		return fmt.Errorf("failed to marshal updated session: %w", err)
@@ -329,6 +391,22 @@ func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Sess
 
 	if err := s.client.Set(ctx, key, updatedData, s.ttl).Err(); err != nil {
 		return fmt.Errorf("failed to update session: %w", err)
+	}
+
+	// Apply the delta to the live session state so the current invocation
+	// observes it immediately. The merged map keeps app:/user: keys prefixed
+	// and session keys plain, exactly the shape the delta arrives in.
+	if len(liveDelta) > 0 {
+		if rs, ok := sess.(*redisSession); ok {
+			rs.state.applyLocal(liveDelta)
+			rs.touch(evt.Timestamp)
+		} else if st := sess.State(); st != nil {
+			for k, v := range liveDelta {
+				if err := st.Set(k, v); err != nil {
+					return fmt.Errorf("failed to apply state delta to live session: %w", err)
+				}
+			}
+		}
 	}
 
 	return nil
@@ -512,12 +590,25 @@ type redisSession struct {
 	lastUpdateTime time.Time
 }
 
-func (s *redisSession) ID() string                { return s.id }
-func (s *redisSession) AppName() string           { return s.appName }
-func (s *redisSession) UserID() string            { return s.userID }
-func (s *redisSession) State() session.State      { return s.state }
-func (s *redisSession) Events() session.Events    { return s.events }
-func (s *redisSession) LastUpdateTime() time.Time { return s.lastUpdateTime }
+func (s *redisSession) ID() string             { return s.id }
+func (s *redisSession) AppName() string        { return s.appName }
+func (s *redisSession) UserID() string         { return s.userID }
+func (s *redisSession) State() session.State   { return s.state }
+func (s *redisSession) Events() session.Events { return s.events }
+
+func (s *redisSession) LastUpdateTime() time.Time {
+	s.state.mu.RLock()
+	defer s.state.mu.RUnlock()
+	return s.lastUpdateTime
+}
+
+// touch advances the session's last update time. Guarded by the state mutex
+// because AppendEvent may run while another goroutine reads the session.
+func (s *redisSession) touch(t time.Time) {
+	s.state.mu.Lock()
+	s.lastUpdateTime = t
+	s.state.mu.Unlock()
+}
 
 func (s *redisSession) toStorable() storableSession {
 	sessionOnly := make(map[string]any)
@@ -537,8 +628,11 @@ func (s *redisSession) toStorable() storableSession {
 
 // redisState implements session.State with Redis persistence.
 // It holds the merged (all tiers) state in memory and routes writes to the
-// correct Redis key based on the key prefix.
+// correct Redis key based on the key prefix. The mutex guards the in-memory
+// map: adk agents may run concurrently within one invocation (parallel agents,
+// workflow branches), so reads and writes can otherwise race.
 type redisState struct {
+	mu      sync.RWMutex
 	data    map[string]any
 	client  *redis.Client
 	key     string
@@ -565,15 +659,29 @@ func newRedisState(initial map[string]any, client *redis.Client, key string, ttl
 }
 
 func (s *redisState) Get(key string) (any, error) {
+	s.mu.RLock()
 	v, ok := s.data[key]
+	s.mu.RUnlock()
 	if !ok {
 		return nil, session.ErrStateKeyNotExist
 	}
 	return v, nil
 }
 
+// applyLocal merges a state delta into the in-memory map without touching
+// Redis. Used by AppendEvent, which has already persisted the delta itself.
+func (s *redisState) applyLocal(delta map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range delta {
+		s.data[k] = v
+	}
+}
+
 func (s *redisState) Set(key string, value any) error {
+	s.mu.Lock()
 	s.data[key] = value
+	s.mu.Unlock()
 
 	ctx := context.Background()
 
@@ -631,11 +739,13 @@ func (s *redisState) persistSessionState() error {
 	}
 
 	storable.State = make(map[string]any)
+	s.mu.RLock()
 	for k, v := range s.data {
 		if !strings.HasPrefix(k, session.KeyPrefixApp) && !strings.HasPrefix(k, session.KeyPrefixUser) && !strings.HasPrefix(k, session.KeyPrefixTemp) {
 			storable.State[k] = v
 		}
 	}
+	s.mu.RUnlock()
 	storable.LastUpdateTime = time.Now()
 
 	updatedData, err := json.Marshal(storable)
@@ -651,8 +761,16 @@ func (s *redisState) persistSessionState() error {
 }
 
 func (s *redisState) All() iter.Seq2[string, any] {
+	// Copy under the read lock so iteration never races with a concurrent
+	// write from a parallel branch, mirroring the in-memory service.
+	s.mu.RLock()
+	snapshot := make(map[string]any, len(s.data))
+	for k, v := range s.data {
+		snapshot[k] = v
+	}
+	s.mu.RUnlock()
 	return func(yield func(string, any) bool) {
-		for k, v := range s.data {
+		for k, v := range snapshot {
 			if !yield(k, v) {
 				return
 			}
