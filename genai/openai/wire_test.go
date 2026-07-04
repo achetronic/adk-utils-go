@@ -100,3 +100,111 @@ func TestWireBody_NilFunctionResponse(t *testing.T) {
 		t.Errorf("tool content = %q, want \"{}\"", tool["content"])
 	}
 }
+
+func TestStreamReasoning(t *testing.T) {
+	// Streaming final response must carry a Thought part when deltas stream reasoning.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"thinking \"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"step by step\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "gpt-test"})
+	ctx := context.Background()
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+		},
+	}
+
+	var finalResp *model.LLMResponse
+	for resp, err := range m.GenerateContent(ctx, req, true) {
+		if err != nil {
+			t.Fatalf("unexpected streaming error: %v", err)
+		}
+		if !resp.Partial {
+			finalResp = resp
+		}
+	}
+
+	if finalResp == nil {
+		t.Fatalf("expected non-nil final response")
+	}
+
+	parts := finalResp.Content.Parts
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d: %#v", len(parts), parts)
+	}
+
+	if !parts[0].Thought {
+		t.Errorf("expected first part to be a thought")
+	}
+	if parts[0].Text != "thinking step by step" {
+		t.Errorf("got thought text %q, want %q", parts[0].Text, "thinking step by step")
+	}
+
+	if parts[1].Thought {
+		t.Errorf("expected second part to not be a thought")
+	}
+	if parts[1].Text != "hello" {
+		t.Errorf("got content text %q, want %q", parts[1].Text, "hello")
+	}
+}
+
+func TestStreamReasoningOnlyDeltas(t *testing.T) {
+	// Streaming deltas with reasoning only must yield partial responses with a Thought part.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"only thought\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "gpt-test"})
+	ctx := context.Background()
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+		},
+	}
+
+	var partialResps []*model.LLMResponse
+	for resp, err := range m.GenerateContent(ctx, req, true) {
+		if err != nil {
+			t.Fatalf("unexpected streaming error: %v", err)
+		}
+		if resp.Partial {
+			partialResps = append(partialResps, resp)
+		}
+	}
+
+	if len(partialResps) == 0 {
+		t.Fatalf("expected at least one partial response")
+	}
+
+	foundThought := false
+	for _, partial := range partialResps {
+		for _, part := range partial.Content.Parts {
+			if part.Thought {
+				if part.Text == "only thought" {
+					foundThought = true
+				}
+			}
+		}
+	}
+
+	if !foundThought {
+		t.Errorf("failed to find partial response containing the Thought part")
+	}
+}

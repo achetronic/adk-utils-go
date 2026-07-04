@@ -146,7 +146,10 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
 
-		// Yield partial responses as chunks arrive
+		// The SDK accumulator drops the raw JSON envelope, so streamed reasoning
+		// is aggregated here for the final response.
+		var reasoningBuf strings.Builder
+
 		for stream.Next() {
 			chunk := stream.Current()
 			acc.AddChunk(chunk)
@@ -156,22 +159,16 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			}
 
 			delta := chunk.Choices[0].Delta
-			// reasoning_content is a non-standard field used by OpenAI-compatible
-			// providers (Kimi K2.6, DeepSeek-R1, Qwen3-Thinking, etc.) to stream
-			// hidden chain-of-thought tokens. The official OpenAI schema does not
-			// include it, so it is read from the raw JSON envelope rather than a
-			// typed field on Delta. See extractReasoningContent for details.
 			reasoning := extractReasoningContent(delta.RawJSON())
+			if reasoning != "" {
+				reasoningBuf.WriteString(reasoning)
+			}
 
 			if delta.Content == "" && reasoning == "" {
 				continue
 			}
 
-			// Order is significant: reasoning tokens are emitted before the
-			// final answer tokens, so the Part order mirrors the temporal
-			// order in which the model produced them. Downstream consumers
-			// (e.g. ADK's llmagent) iterate parts and filter on Thought, so
-			// having reasoning first matches the natural transcript order.
+			// Reasoning precedes answer text to mirror the order the model produced the tokens.
 			var parts []*genai.Part
 			if reasoning != "" {
 				parts = append(parts, &genai.Part{Text: reasoning, Thought: true})
@@ -198,28 +195,23 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			return
 		}
 
-		// Build and yield final aggregated response
-		yield(m.buildStreamFinalResponse(&acc), nil)
+		yield(m.buildStreamFinalResponse(&acc, reasoningBuf.String()), nil)
 	}
 }
 
 // buildStreamFinalResponse creates the final LLMResponse from accumulated stream data.
-func (m *Model) buildStreamFinalResponse(acc *openai.ChatCompletionAccumulator) *model.LLMResponse {
+func (m *Model) buildStreamFinalResponse(acc *openai.ChatCompletionAccumulator, reasoning string) *model.LLMResponse {
 	content := &genai.Content{
 		Role:  genai.RoleModel,
 		Parts: []*genai.Part{},
 	}
 
+	if reasoning != "" {
+		content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
+	}
+
 	if len(acc.Choices) > 0 {
 		choice := acc.Choices[0]
-
-		// Same rationale as in generateStream: read reasoning_content from the
-		// raw JSON since openai-go does not type the non-standard field.
-		// Reasoning Part goes before the final-answer Part to preserve the
-		// temporal order in which the model produced the tokens.
-		if reasoning := extractReasoningContent(choice.Message.RawJSON()); reasoning != "" {
-			content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
-		}
 
 		if choice.Message.Content != "" {
 			content.Parts = append(content.Parts, &genai.Part{Text: choice.Message.Content})
@@ -786,36 +778,65 @@ func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentRe
 	}
 }
 
-// extractReasoningContent reads the non-standard "reasoning_content" field
-// from the SDK's raw JSON envelope.
-//
-// The OpenAI Chat Completions schema does NOT include a "reasoning_content"
-// field — for OpenAI's own reasoning models (o-series, gpt-5.x) the reasoning
-// text is hidden and only the token count is reported (via
-// CompletionTokensDetails.ReasoningTokens). Reasoning *text* is only
-// available through the Responses API, which this adapter does not use.
-//
-// However, multiple OpenAI-compatible providers (DeepSeek-R1, Kimi K2/K2.6,
-// Qwen3-Thinking, etc.) extend the response with a "reasoning_content"
-// field on choices[].message and choices[].delta. openai-go does not type
-// this field but preserves it in JSON.raw, which is reachable via the
-// generated RawJSON() accessor. Parsing the raw envelope is the documented
-// way to read non-standard fields in this SDK.
-//
-// Returns "" if the field is absent, empty, or the JSON cannot be parsed —
-// callers should treat empty as "no reasoning content emitted" and skip
-// adding a thought Part.
+// extractReasoningContent reads reasoning text from the raw JSON envelope, trying the
+// non-standard variants used by OpenAI-compatible providers (reasoning_content, reasoning,
+// reasoning_details). openai-go does not type these fields; the first non-empty match wins.
 func extractReasoningContent(rawJSON string) string {
 	if rawJSON == "" {
 		return ""
 	}
-	var probe struct {
-		ReasoningContent string `json:"reasoning_content"`
-	}
+	var probe map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(rawJSON), &probe); err != nil {
 		return ""
 	}
-	return probe.ReasoningContent
+
+	if rcRaw, ok := probe["reasoning_content"]; ok {
+		var s string
+		if json.Unmarshal(rcRaw, &s) == nil && s != "" {
+			return s
+		}
+	}
+
+	if rRaw, ok := probe["reasoning"]; ok {
+		var s string
+		if json.Unmarshal(rRaw, &s) == nil && s != "" {
+			return s
+		}
+	}
+
+	if rdRaw, ok := probe["reasoning_details"]; ok {
+		var rawDetails []json.RawMessage
+		if json.Unmarshal(rdRaw, &rawDetails) == nil {
+			var textParts []string
+			var summaryParts []string
+			for _, rd := range rawDetails {
+				var entry struct {
+					Type    string `json:"type"`
+					Text    string `json:"text"`
+					Summary string `json:"summary"`
+				}
+				if json.Unmarshal(rd, &entry) == nil {
+					if entry.Type == "reasoning.text" {
+						if entry.Text != "" {
+							textParts = append(textParts, entry.Text)
+						}
+					} else if entry.Type == "reasoning.summary" {
+						if entry.Summary != "" {
+							summaryParts = append(summaryParts, entry.Summary)
+						}
+					}
+				}
+			}
+			if len(textParts) > 0 {
+				return strings.Join(textParts, "")
+			}
+			if len(summaryParts) > 0 {
+				return strings.Join(summaryParts, "")
+			}
+		}
+	}
+
+	return ""
 }
 
 // convertRole maps genai roles to OpenAI roles.

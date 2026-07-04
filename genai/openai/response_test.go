@@ -131,7 +131,7 @@ func TestConvertResponse(t *testing.T) {
 func TestBuildStreamFinalResponse(t *testing.T) {
 	t.Run("empty accumulator returns an empty but valid response", func(t *testing.T) {
 		m := newModelForTest()
-		got := m.buildStreamFinalResponse(&openai.ChatCompletionAccumulator{})
+		got := m.buildStreamFinalResponse(&openai.ChatCompletionAccumulator{}, "")
 		if got == nil {
 			t.Fatalf("expected non-nil response")
 		}
@@ -166,7 +166,7 @@ func TestBuildStreamFinalResponse(t *testing.T) {
 				Usage: openai.CompletionUsage{TotalTokens: 9},
 			},
 		}
-		got := m.buildStreamFinalResponse(acc)
+		got := m.buildStreamFinalResponse(acc, "")
 		if got.FinishReason != genai.FinishReasonStop {
 			t.Errorf("FinishReason = %v, want Stop", got.FinishReason)
 		}
@@ -294,6 +294,41 @@ func TestExtractReasoningContent(t *testing.T) {
 		{
 			name: "reasoning_content of wrong type (non-string) returns empty",
 			raw:  `{"reasoning_content":123}`,
+			want: "",
+		},
+		{
+			name: "raw with reasoning string returns value",
+			raw:  `{"reasoning":"thought with reasoning"}`,
+			want: "thought with reasoning",
+		},
+		{
+			name: "raw with empty reasoning returns empty",
+			raw:  `{"reasoning":""}`,
+			want: "",
+		},
+		{
+			name: "raw with both reasoning_content and reasoning returns reasoning_content",
+			raw:  `{"reasoning_content":"primary","reasoning":"secondary"}`,
+			want: "primary",
+		},
+		{
+			name: "raw with reasoning_details containing two text entries concatenated",
+			raw:  `{"reasoning_details":[{"type":"reasoning.text","text":"hello "},{"type":"reasoning.text","text":"world"}]}`,
+			want: "hello world",
+		},
+		{
+			name: "raw with reasoning_details containing only encrypted entry returns empty",
+			raw:  `{"reasoning_details":[{"type":"reasoning.encrypted","data":"secret"}]}`,
+			want: "",
+		},
+		{
+			name: "raw with reasoning_details containing summary entry and no text returns summary",
+			raw:  `{"reasoning_details":[{"type":"reasoning.summary","summary":"brief summary"}]}`,
+			want: "brief summary",
+		},
+		{
+			name: "raw with reasoning of wrong type returns empty",
+			raw:  `{"reasoning":123}`,
 			want: "",
 		},
 	}
@@ -485,7 +520,7 @@ func TestBuildStreamFinalResponse_WithReasoningContent(t *testing.T) {
 		acc := &openai.ChatCompletionAccumulator{ChatCompletion: cc}
 
 		m := newModelForTest()
-		got := m.buildStreamFinalResponse(acc)
+		got := m.buildStreamFinalResponse(acc, "Streamed chain-of-thought.")
 
 		if len(got.Content.Parts) != 2 {
 			t.Fatalf("expected 2 parts, got %d", len(got.Content.Parts))
