@@ -3,6 +3,10 @@
 
 package langfuse
 
+import (
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+)
+
 // Config holds the credentials and optional metadata needed to export traces
 // to a Langfuse instance via OTLP/HTTP.
 //
@@ -41,6 +45,18 @@ type Config struct {
 	// (e.g. plain-HTTP local development). The default (false) keeps TLS
 	// enabled, which is required for the public Langfuse Cloud endpoints.
 	Insecure bool `yaml:"insecure,omitempty" json:"insecure,omitempty"`
+
+	// TracerProviderOptions are additional options applied when constructing
+	// the underlying trace provider, on top of the exporter and resource that
+	// Setup wires itself. Use it to inject settings the default wiring does
+	// not expose, such as a custom ID generator (e.g. deterministic trace IDs
+	// derived from an external request/run ID, so paused-and-resumed agent
+	// invocations land in a single Langfuse trace), a sampler to bound
+	// ingestion volume, or span limits.
+	//
+	// Programmatic only: this field cannot be populated from YAML/JSON
+	// configuration files. When empty, Setup behaves exactly as before.
+	TracerProviderOptions []sdktrace.TracerProviderOption `yaml:"-" json:"-"`
 }
 
 // IsEnabled reports whether the minimum required credentials (PublicKey and

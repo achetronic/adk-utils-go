@@ -251,6 +251,37 @@ runnr, _ := runner.New(runner.Config{
 })
 ```
 
+### Custom TracerProvider Options
+
+`Config.TracerProviderOptions` (programmatic only, not readable from YAML/JSON)
+lets you inject trace-provider settings the default wiring does not expose —
+a custom ID generator, a sampler, span limits — while keeping the exporter and
+resource that `Setup` wires itself.
+
+The flagship use case is deterministic trace IDs derived from an external
+request/run ID, following Langfuse's recommended external-ID correlation
+pattern (`create_trace_id(seed=...)` in the Python SDK). Agents that pause for
+human input and resume in a later HTTP request otherwise produce a fresh
+random trace ID per request, splitting one logical run across several
+Langfuse traces:
+
+```go
+pluginCfg, shutdown, err := langfuse.Setup(&langfuse.Config{
+    PublicKey: os.Getenv("LANGFUSE_PUBLIC_KEY"),
+    SecretKey: os.Getenv("LANGFUSE_SECRET_KEY"),
+    TracerProviderOptions: []sdktrace.TracerProviderOption{
+        // myIDGenerator returns a trace ID derived from the run ID found in
+        // ctx (fall back to random when absent), so every execution of the
+        // same logical run lands in the same Langfuse trace.
+        sdktrace.WithIDGenerator(myIDGenerator),
+        // Optional: bound ingestion volume on high-traffic services.
+        // sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1))),
+    },
+})
+```
+
+When the field is empty, `Setup` behaves exactly as before.
+
 ### Combining with ContextGuard
 
 ```go
