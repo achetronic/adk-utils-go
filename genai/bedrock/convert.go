@@ -79,6 +79,9 @@ func (m *Model) buildConverseInput(req *model.LLMRequest) (*bedrockruntime.Conve
 
 	// Repair message history to comply with Bedrock's requirements (every
 	// toolUse needs a matching toolResult), mirroring genai/anthropic's A2.
+	// dropEmptyMessages runs first to strip guardrail-blocked turns before
+	// repairMessageHistory inspects tool-use pairing.
+	messages = dropEmptyMessages(messages)
 	messages = repairMessageHistory(messages)
 	messages = trimFinalAssistantWhitespace(messages)
 	input.Messages = messages

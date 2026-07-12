@@ -428,4 +428,19 @@ for reasoning content (only `reasoningContent` as an *output* block kind);
 there is nothing to echo it back as, and the model is expected to
 regenerate reasoning each turn rather than replay a prior trace.
 
+### B8 - Guardrail-blocked turns are stripped from history before sending
+
+When a Bedrock Guardrail blocks an assistant turn, Bedrock may return a
+response with empty content (no content blocks). ADK replays the full
+conversation history on every request, so this empty assistant turn gets
+included in the next request — Bedrock then rejects the request with a
+ValidationException because empty-content turns are invalid.
+
+`dropEmptyMessages` runs as the first history-repair step in
+`buildConverseInput` (before `repairMessageHistory` and
+`trimFinalAssistantWhitespace`) and removes any message whose content
+block list is empty, regardless of role. This is safe because a
+non-empty message is never a valid Bedrock conversation turn and such
+turns only appear as guardrail artefacts replayed from ADK's history.
+
 

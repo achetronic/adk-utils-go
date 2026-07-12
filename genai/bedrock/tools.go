@@ -152,6 +152,20 @@ func isList(v any) bool {
 	return ok
 }
 
+// dropEmptyMessages removes messages with no content blocks. These arise when
+// a Bedrock Guardrail blocks an assistant turn: ADK replays the empty response
+// as history on the next request, and Bedrock rejects requests that contain
+// empty-content turns.
+func dropEmptyMessages(messages []types.Message) []types.Message {
+	out := make([]types.Message, 0, len(messages))
+	for _, msg := range messages {
+		if len(msg.Content) > 0 {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
 // repairMessageHistory drops orphaned toolUse blocks (those without a
 // matching toolResult in the immediately following user message) before
 // sending, mirroring genai/anthropic's A2: Bedrock rejects a request where

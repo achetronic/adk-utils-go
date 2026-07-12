@@ -107,6 +107,23 @@ func TestRepairMessageHistory_DropsOrphanedToolUse(t *testing.T) {
 	}
 }
 
+func TestDropEmptyMessages(t *testing.T) {
+	messages := []types.Message{
+		{Role: types.ConversationRoleUser, Content: []types.ContentBlock{textBlock("hi")}},
+		{Role: types.ConversationRoleAssistant, Content: []types.ContentBlock{}}, // guardrail-blocked turn
+		{Role: types.ConversationRoleUser, Content: []types.ContentBlock{textBlock("hello again")}},
+	}
+
+	result := dropEmptyMessages(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("len(result) = %d, want 2 (empty assistant turn should be dropped)", len(result))
+	}
+	if result[0].Role != types.ConversationRoleUser || result[1].Role != types.ConversationRoleUser {
+		t.Errorf("unexpected roles after dropping empty message: %v, %v", result[0].Role, result[1].Role)
+	}
+}
+
 func TestRepairMessageHistory_KeepsMatchedToolUse(t *testing.T) {
 	messages := []types.Message{
 		{Role: types.ConversationRoleAssistant, Content: []types.ContentBlock{
