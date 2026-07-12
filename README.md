@@ -6,7 +6,7 @@ Utilities and implementations for [Google's Agent Development Kit (ADK)](https:/
 
 This repository provides production-ready implementations for:
 
-- **LLM Clients**: OpenAI and Anthropic clients compatible with ADK
+- **LLM Clients**: OpenAI, Anthropic, and Amazon Bedrock (Converse API, any Bedrock model, native Guardrails) clients compatible with ADK
 - **Session Management**: Redis-based session persistence
 - **Long-term Memory**: PostgreSQL + pgvector for semantic search
 - **Memory Tools**: Toolsets for agent-controlled memory operations
@@ -19,7 +19,8 @@ This repository provides production-ready implementations for:
 ```
 ├── genai/            # LLM client implementations
 │   ├── openai/       # OpenAI client (works with Ollama, OpenRouter, etc.)
-│   └── anthropic/    # Anthropic Claude client
+│   ├── anthropic/    # Anthropic Claude client
+│   └── bedrock/      # Amazon Bedrock Converse API client (any Bedrock model, Guardrails)
 ├── session/          # Session service implementations
 │   └── redis/        # Redis session service
 ├── memory/           # Memory service implementations
@@ -139,6 +140,81 @@ Both clients support:
 - Extended thinking: classic budget API (`ThinkingBudgetTokens`) and adaptive effort API (`ThinkingEffort` + `ThinkingMode`)
 - Usage metadata
 - Custom HTTP headers (multi-value)
+
+### Amazon Bedrock Client
+
+Unlike the OpenAI and Anthropic clients above, this one isn't tied to a single model family. It's built on Bedrock's **Converse API** — AWS's unified inference interface — so the same adapter works against any Bedrock model that supports it: Anthropic Claude, Meta Llama, Amazon Nova, Mistral, Cohere, AI21, and others. Swap `ModelID` and nothing else changes.
+
+```go
+import genaibedrock "github.com/achetronic/adk-utils-go/genai/bedrock"
+
+llmModel, err := genaibedrock.New(ctx, genaibedrock.Config{
+    ModelID: "anthropic.claude-sonnet-4-5-20250929-v1:0", // or any Bedrock model/inference-profile ID
+    Region:  "us-east-1",                                  // optional; falls back to the default AWS config chain
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+agent, _ := llmagent.New(llmagent.Config{
+    Name:  "assistant",
+    Model: llmModel,
+})
+```
+
+There's no API key: credentials are resolved through the standard AWS SDK default chain (environment variables, shared config/credentials files, IAM role, SSO, EC2/ECS instance credentials, ...). For assumed roles, custom retryers, or any other advanced setup, build your own `aws.Config` and pass it via `AWSConfig` — it takes precedence over `Region`/`Profile`:
+
+```go
+import "github.com/aws/aws-sdk-go-v2/config"
+
+awsCfg, _ := config.LoadDefaultConfig(ctx /* ... your own options ... */)
+
+llmModel, _ := genaibedrock.New(ctx, genaibedrock.Config{
+    ModelID:   "us.meta.llama3-3-70b-instruct-v1:0",
+    AWSConfig: &awsCfg,
+})
+```
+
+#### Bedrock Guardrails
+
+Attach a guardrail to every request the model makes:
+
+```go
+llmModel, _ := genaibedrock.New(ctx, genaibedrock.Config{
+    ModelID: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    Guardrail: &genaibedrock.GuardrailConfig{
+        Identifier: "abc123xyz",  // guardrail ID or ARN
+        Version:    "1",          // or "DRAFT" for the working draft
+        Trace:      "enabled",    // "enabled" | "enabled_full" | "" (disabled)
+    },
+})
+```
+
+This uses Converse's native `GuardrailConfig` field, not the raw `InvokeModel` API's header+body combination (which additionally requires wrapping prompt spans in `<amazon-bedrock-guardrails-guardContent_*>` markers for input tagging — Converse needs none of that).
+
+To check whether a guardrail intervened on a given turn, read `LLMResponse.CustomMetadata`:
+
+```go
+for resp, err := range llmModel.GenerateContent(ctx, req, false) {
+    if err != nil {
+        log.Fatal(err)
+    }
+    if genaibedrock.Intervened(resp.CustomMetadata) {
+        // the guardrail blocked or altered this turn
+    }
+}
+```
+
+#### Supported Features
+
+- Streaming and non-streaming responses, against any Converse-supporting Bedrock model
+- System instructions
+- Tool/function calling, including `ToolConfig.FunctionCallingConfig.Mode` → `tool_choice` translation (see [AGENTS.md](./.agents/AGENTS.md#llm-adapters--tool_choice-mapping))
+- Image inputs (PNG, JPEG, GIF, WebP)
+- Temperature, TopP, MaxOutputTokens, StopSequences
+- Bedrock Guardrails, with intervention/trace surfaced via `CustomMetadata`
+- Usage metadata
+- Provider-specific extra fields via `AdditionalModelRequestFields` (e.g. Anthropic extended thinking on Bedrock)
 
 ## Session Service (Redis)
 
@@ -392,6 +468,7 @@ Complete working examples in the `examples/` directory:
 | --------------------------------------------- | ------------------------------------------- |
 | [openai-client](examples/openai-client)       | OpenAI/Ollama client usage                                |
 | [anthropic-client](examples/anthropic-client) | Anthropic Claude client usage                             |
+| [bedrock-client](examples/bedrock-client)     | Amazon Bedrock Converse API client usage, with optional Guardrail |
 | [session-memory](examples/session-memory)     | Session management with Redis                             |
 | [long-term-memory](examples/long-term-memory) | Long-term memory with PostgreSQL + pgvector               |
 | [full-memory](examples/full-memory)           | Combined session + long-term memory                       |
@@ -417,6 +494,9 @@ go run ./examples/openai-client
 | `OPENAI_API_KEY`     | -                                                                      | OpenAI API key (not needed for Ollama) |
 | `OPENAI_BASE_URL`    | -                                                                      | OpenAI-compatible API endpoint         |
 | `ANTHROPIC_API_KEY`  | -                                                                      | Anthropic API key                      |
+| `MODEL_ID`           | -                                                                      | Bedrock model/inference-profile ID (bedrock-client example)            |
+| `AWS_REGION`         | -                                                                      | AWS region (bedrock-client example; falls back to the default AWS config chain) |
+| `GUARDRAIL_IDENTIFIER` | -                                                                    | Bedrock Guardrail ID/ARN (bedrock-client example; omit to disable)     |
 | `MODEL_NAME`         | `gpt-4o` / `claude-sonnet-4-5-20250929`                                | Model name                             |
 | `EMBEDDING_BASE_URL` | `http://localhost:11434/v1`                                            | Embedding API endpoint                 |
 | `EMBEDDING_MODEL`    | `nomic-embed-text`                                                     | Embedding model                        |

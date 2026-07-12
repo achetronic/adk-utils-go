@@ -314,3 +314,118 @@ fabricates input. It is the caller's responsibility not to end on an assistant
 turn unless the target model supports prefill. Note `repairMessageHistory` can
 leave a history ending in assistant (after dropping a trailing orphan tool_use);
 that is the most likely way to hit this. Observed on `claude-sonnet-4-6`.
+
+---
+
+## Bedrock adapter (`genai/bedrock`)
+
+Targets Amazon Bedrock's **Converse API**, not the raw `InvokeModel` API and
+not a provider-specific transport (e.g. wrapping `anthropic-sdk-go`'s
+`bedrock` package). This is the central design decision and it shapes
+everything else below.
+
+### B1 - Converse, not InvokeModel: this is what "any model offered by AWS" requires
+
+`InvokeModel`/`InvokeModelWithResponseStream` speak each model family's own
+wire format (Anthropic's Messages shape, Llama's prompt-template shape,
+Titan's shape, ...); building a generic adapter on top of it would mean
+reimplementing a request/response converter per model family, which is a
+different and much larger library. Converse is AWS's unified inference API:
+one typed request/response shape (`types.Message`/`types.ContentBlock`)
+that every Converse-supporting Bedrock model accepts, including
+cross-provider tool use. One adapter, any Bedrock model.
+
+This also has a real, non-cosmetic guardrail benefit (see B2): Converse's
+`GuardrailConfig` is a normal typed field, where `InvokeModel`'s guardrail
+support requires synchronized header+body changes and, for input tagging,
+wrapping prompt spans in literal `<amazon-bedrock-guardrails-guardContent_*>`
+markers. Converse avoids that whole class of footgun.
+
+### B2 - GuardrailConfig is the Converse shape; it is not interchangeable with InvokeModel's header+body pair
+
+Confirmed against the Bedrock User Guide ("Test your guardrail",
+"InvokeModel"/"InvokeModelWithResponseStream" API references): on the
+`InvokeModel` path, attaching a guardrail requires **both**
+`X-Amzn-Bedrock-GuardrailIdentifier`/`-GuardrailVersion` HTTP headers **and**
+a top-level `"amazon-bedrock-guardrailConfig"` body field - sending one
+without the other is a hard error ("Guardrail was enabled but input is in
+incorrect format"). Converse instead takes a typed `GuardrailConfiguration`
+request field (`Converse`) / `GuardrailStreamConfiguration` (`ConverseStream`,
+which additionally needs `StreamProcessingMode`; this adapter always requests
+`sync`). `GuardrailConfig.toConverseConfig()` /
+`.toConverseStreamConfig()` exist as two methods, not one, because the two
+Bedrock types are genuinely distinct - not a naming inconsistency.
+
+### B3 - Guardrail trace/intervention surfaces via `LLMResponse.CustomMetadata["bedrockGuardrail"]`
+
+`model.LLMResponse` has no dedicated guardrail field. Silently dropping
+`StopReason == "guardrail_intervened"` or the trace would hide the one
+thing a guardrail-enabled caller most needs: whether the guardrail touched
+this turn. `guardrailMetadata` stamps
+`CustomMetadata["bedrockGuardrail"] = {"intervened": bool, "trace": ...}`
+(trace only present when `GuardrailConfig.Trace` requested one); the package
+exports `Intervened(customMetadata map[string]any) bool` so callers don't
+need to know the key shape. Non-streaming and streaming responses use
+distinct Bedrock types for the same data (`types.ConverseTrace` vs.
+`types.ConverseStreamTrace`, both wrapping a `*types.GuardrailTraceAssessment`)
+- `guardrailMetadata` takes the inner `GuardrailTraceAssessment` directly so
+both call sites share one implementation instead of two near-duplicates.
+
+### B4 - Role mapping, tool ID sanitization, history repair, and trailing-whitespace trim mirror the Anthropic adapter (A1, A2, A7, A9)
+
+Converse's common content-block set inherits the same practical constraints
+the Anthropic adapter already works around, because the most common Converse
+backend (Claude on Bedrock) has the same underlying API contract:
+
+- **Role**: only `user`/`assistant` exist as message roles (system is a
+  separate top-level field); unknown roles fall back to `user` (mirrors A7).
+- **Tool IDs**: `sanitizeToolID` enforces Bedrock's `toolUseId` charset
+  (`[a-zA-Z0-9_-]`, 1-64 chars) the same way `genai/anthropic`'s
+  `sanitizeToolID` enforces Anthropic's (mirrors A1); a stable hash-derived
+  ID keeps a toolUse/toolResult pair matching after sanitization.
+- **History repair**: `repairMessageHistory` drops orphaned `toolUse` blocks
+  with no matching `toolResult` in the immediately-following user turn
+  (mirrors A2) - ADK histories can end mid-tool-call (cancel, compaction,
+  agent switch), and Bedrock rejects an unanswered toolUse the same way
+  Anthropic does.
+- **Trailing whitespace**: `trimFinalAssistantWhitespace` right-trims the
+  last text block of a trailing assistant turn, dropping it if left empty
+  (mirrors A9).
+
+Tool schema's top-level `type` is likewise forced to `"object"` (mirrors A6),
+and nil/empty tool-call args or tool-result payloads go through
+`common.MarshalToolPayload` so they serialize to `{}`, never `null` (D1/A8).
+
+### B5 - `genai.Schema`'s uppercase type enum is lowercased for the wire
+
+Like `genai/anthropic`'s `lowercaseTypes`, `lowercaseSchemaTypes` recurses a
+decoded JSON-schema map lowercasing every `"type"` value. `genai.Schema.Type`
+marshals using Gemini's uppercase convention (`"OBJECT"`, `"STRING"`); plain
+JSON Schema - what Converse's `ToolInputSchema` expects - uses lowercase.
+`FunctionDeclaration.ParametersJsonSchema` is preferred over the typed
+`Parameters` field when both are set, matching `genai/anthropic`'s
+`convertTools` precedence.
+
+### B6 - Credentials and region use the standard AWS SDK default chain
+
+`Config` does not have an `APIKey` field (there is no Bedrock API key - it's
+SigV4-signed IAM auth). `New` resolves credentials via
+`config.LoadDefaultConfig` (env vars, shared config/credentials files, IAM
+role, SSO, container/EC2 instance credentials, ...) unless the caller
+supplies a fully-built `aws.Config` via `Config.AWSConfig`, which takes
+precedence over `Region`/`Profile` and is the escape hatch for assumed
+roles, custom retryers, or a non-default HTTP client.
+
+### B7 - Reasoning/thinking content is read-only on the way in, dropped on the way out
+
+A `reasoningContent` block in a Converse response (Claude/Nova extended
+thinking via Bedrock) is surfaced as a thought `Part` (`Thought=true`) so
+consumers that want to display or log it can. On the way out,
+`convertPart` drops thought parts unconditionally (regardless of role) -
+unlike `genai/anthropic`'s A3, which echoes thinking blocks back in
+assistant turns. Converse's common `ContentBlock` set has no input variant
+for reasoning content (only `reasoningContent` as an *output* block kind);
+there is nothing to echo it back as, and the model is expected to
+regenerate reasoning each turn rather than replay a prior trace.
+
+

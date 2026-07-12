@@ -68,8 +68,10 @@ adk-utils-go/
 ├── genai/
 │   ├── openai/
 │   │   └── openai.go            # OpenAI/Ollama-compatible LLM adapter
-│   └── anthropic/
-│       └── anthropic.go         # Anthropic Claude LLM adapter
+│   ├── anthropic/
+│   │   └── anthropic.go         # Anthropic Claude LLM adapter
+│   └── bedrock/
+│       └── bedrock.go           # Amazon Bedrock Converse API LLM adapter (any Bedrock model, Guardrails)
 ├── session/
 │   └── redis/
 │       ├── session.go           # Redis-backed session.Service implementation
@@ -107,6 +109,7 @@ adk-utils-go/
 ├── examples/
 │   ├── openai-client/main.go
 │   ├── anthropic-client/main.go
+│   ├── bedrock-client/main.go
 │   ├── session-memory/main.go
 │   ├── long-term-memory/main.go
 │   ├── full-memory/main.go
@@ -121,6 +124,7 @@ adk-utils-go/
 | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `genai/common`        | Helpers shared by the LLM adapters so cross-provider wire rules are implemented once (e.g. `MarshalToolPayload`)  |
 | `genai/anthropic`     | Anthropic Claude `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)          |
+| `genai/bedrock`       | Amazon Bedrock Converse API `model.LLM` adapter - any Bedrock model (Claude, Llama, Nova, Mistral, ...), native Bedrock Guardrails support |
 | `genai/openai`        | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)  |
 | `session/redis`       | Redis-backed implementation of `session.Service`                                                                  |
 | `memory/memorytypes`  | Shared types (`EntryWithID`) and interfaces (`MemoryService`, `ExtendedMemoryService`)                            |
@@ -380,26 +384,26 @@ AfterModelCallback:
 
 ## LLM Adapters — tool_choice Mapping
 
-Both `genai/openai` and `genai/anthropic` translate `genai.GenerateContentConfig.ToolConfig.FunctionCallingConfig` into the provider-native `tool_choice` field during `applyGenerationConfig` / `buildMessageParams`. ADK propagates `ToolConfig` through `basic_processor.go` (`req.Config = clone(state.GenerateContentConfig)`), so the field arrives untouched at the adapter.
+Both `genai/openai`, `genai/anthropic`, and `genai/bedrock` translate `genai.GenerateContentConfig.ToolConfig.FunctionCallingConfig` into the provider-native `tool_choice` field during `applyGenerationConfig` / `buildMessageParams` / `convertToolConfig`. ADK propagates `ToolConfig` through `basic_processor.go` (`req.Config = clone(state.GenerateContentConfig)`), so the field arrives untouched at the adapter.
 
 Without this translation, callers setting `Mode: ANY` on an LLM agent see the setting silently dropped — the typical symptom being models like Kimi K2 or certain Claude variants producing plain-text replies that hand-format tool calls as prose, stranding agentic loops that require a native function call.
 
 ### Shared mapping (identical semantics across providers)
 
-| genai `FunctionCallingConfig.Mode`   | OpenAI `tool_choice`     | Anthropic `tool_choice`     |
-| ------------------------------------ | ------------------------ | --------------------------- |
-| `ModeUnspecified` (zero value)       | unset                    | unset                       |
-| `ModeAuto`                           | `"auto"`                 | `{type: "auto"}`            |
-| `ModeNone`                           | `"none"`                 | `{type: "none"}`            |
-| `ModeAny`, no `AllowedFunctionNames` | `"required"`             | `{type: "any"}`             |
-| `ModeAny`, exactly one name          | named function choice    | `{type: "tool", name: <n>}` |
-| `ModeAny`, multiple names            | fallback to `"required"` | fallback to `{type: "any"}` |
+| genai `FunctionCallingConfig.Mode`   | OpenAI `tool_choice`     | Anthropic `tool_choice`     | Bedrock Converse `ToolChoice`    |
+| ------------------------------------ | ------------------------ | --------------------------- | --------------------------------- |
+| `ModeUnspecified` (zero value)       | unset                    | unset                       | unset                              |
+| `ModeAuto`                           | `"auto"`                 | `{type: "auto"}`            | `&ToolChoiceMemberAuto{}`         |
+| `ModeNone`                           | `"none"`                 | `{type: "none"}`            | unset (Converse has no "none" variant — disable tool use for a turn by not sending `Tools` at all) |
+| `ModeAny`, no `AllowedFunctionNames` | `"required"`             | `{type: "any"}`             | `&ToolChoiceMemberAny{}`          |
+| `ModeAny`, exactly one name          | named function choice    | `{type: "tool", name: <n>}` | `&ToolChoiceMemberTool{Name: <n>}`|
+| `ModeAny`, multiple names            | fallback to `"required"` | fallback to `{type: "any"}` | fallback to `&ToolChoiceMemberAny{}` |
 
-The multi-name fallback is a pragmatic choice: neither provider accepts a list of allowed names in `tool_choice`. Callers who need a multi-function allowlist should combine `ModeAny` with prompt-level instructions.
+The multi-name fallback is a pragmatic choice: none of the three providers accepts a list of allowed names in `tool_choice`. Callers who need a multi-function allowlist should combine `ModeAny` with prompt-level instructions.
 
 ### Tests
 
-Each adapter has a table-driven test (`openai_test.go` / `anthropic_test.go`) covering the seven relevant combinations (three modes, two branches of `AllowedFunctionNames`, two "leave it unset" paths). The Anthropic test asserts on the discriminated-union variant (`OfAuto` / `OfAny` / `OfTool` / `OfNone`) rather than the nested `Type` field because the SDK uses `shared/constant` single-value string types whose in-memory zero is `""` — the discriminator is injected during marshaling, and the variant pointer is what the marshaler keys off of.
+Each adapter has a table-driven test (`openai_test.go` / `anthropic_test.go` / `bedrock_test.go`) covering the relevant combinations (three modes, two branches of `AllowedFunctionNames`, two "leave it unset" paths). The Anthropic test asserts on the discriminated-union variant (`OfAuto` / `OfAny` / `OfTool` / `OfNone`) rather than the nested `Type` field because the SDK uses `shared/constant` single-value string types whose in-memory zero is `""` — the discriminator is injected during marshaling, and the variant pointer is what the marshaler keys off of. The Bedrock test (`TestConvertToolConfig_ToolChoiceMapping`) does the equivalent type-switch over `types.ToolChoice`'s `*ToolChoiceMember*` variants.
 
 ## LLM Adapters: empty tool payloads serialise to `{}`, never `null`
 
