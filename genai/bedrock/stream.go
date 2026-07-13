@@ -146,6 +146,24 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 		flushText()
 		flushToolUse()
 
+		var guardrailTrace *types.GuardrailTraceAssessment
+		if trace != nil {
+			guardrailTrace = trace.Guardrail
+		}
+
+		// When a guardrail blocks the turn, tag whatever text streamed
+		// before Bedrock caught it with an invisible marker rather than
+		// replacing it, so the actual guardrail message still displays (see
+		// markGuardrailBlocked). guardrailBlockedStage picks the input- or
+		// output-stage message when Bedrock returned more than one. Content
+		// must stay non-nil and this event non-partial: a nil Content here
+		// makes ADK skip yielding the event, which can leave a dangling
+		// partial chunk as the last event of the turn and trip ADK's
+		// internal "last event is not final" error. See B8.
+		if stopReason == types.StopReasonGuardrailIntervened {
+			finalParts = markGuardrailBlocked(finalParts, guardrailBlockedStage(guardrailTrace))
+		}
+
 		finalResp := &model.LLMResponse{
 			Content:      &genai.Content{Role: genai.RoleModel, Parts: finalParts},
 			Partial:      false,
@@ -157,10 +175,6 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 				PromptTokenCount:     int32derefOr(usage.InputTokens),
 				CandidatesTokenCount: int32derefOr(usage.OutputTokens),
 			}
-		}
-		var guardrailTrace *types.GuardrailTraceAssessment
-		if trace != nil {
-			guardrailTrace = trace.Guardrail
 		}
 		if meta := guardrailMetadata(stopReason, guardrailTrace); meta != nil {
 			finalResp.CustomMetadata = meta

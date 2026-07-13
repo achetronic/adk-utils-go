@@ -428,19 +428,70 @@ for reasoning content (only `reasoningContent` as an *output* block kind);
 there is nothing to echo it back as, and the model is expected to
 regenerate reasoning each turn rather than replay a prior trace.
 
-### B8 - Guardrail-blocked turns are stripped from history before sending
+### B8 - Guardrail-blocked turns keep Bedrock's own message, tagged with an invisible marker; the triggering user turn is redacted
 
-When a Bedrock Guardrail blocks an assistant turn, Bedrock may return a
-response with empty content (no content blocks). ADK replays the full
-conversation history on every request, so this empty assistant turn gets
-included in the next request — Bedrock then rejects the request with a
-ValidationException because empty-content turns are invalid.
+When a Bedrock Guardrail blocks a turn (`StopReason ==
+"guardrail_intervened"`), `convertOutput` / `generateStream`'s final response
+is passed through `markGuardrailBlocked` (`tools.go`) before being returned.
+Two problems are solved together here:
 
-`dropEmptyMessages` runs as the first history-repair step in
-`buildConverseInput` (before `repairMessageHistory` and
-`trimFinalAssistantWhitespace`) and removes any message whose content
-block list is empty, regardless of role. This is safe because a
-non-empty message is never a valid Bedrock conversation turn and such
-turns only appear as guardrail artefacts replayed from ADK's history.
+1. **`Content` must stay non-nil, non-empty, and the turn non-partial.** An
+   earlier version of this fix set `Content = nil` on a guardrail block,
+   relying on ADK's `base_flow.go` behavior of skipping event storage when
+   `Content == nil && ErrorCode == ""`. This broke streaming: Bedrock often
+   streams several partial text chunks *before* it catches and blocks a
+   response, so those partial chunks were already yielded to ADK. Nil-ing the
+   *closing* event caused ADK to skip yielding it too, leaving the last
+   yielded event of the turn Partial=true with no final event to close it -
+   which trips ADK's `base_flow.go` internal invariant
+   ("TODO: last event is not final", `Flow.Run`). A later version replaced
+   the message text outright with a fixed placeholder string, which also
+   fixed this but discarded whatever guardrail message Bedrock actually
+   returned. `markGuardrailBlocked` keeps Bedrock's real text (or, only when
+   Bedrock returned no content at all, falls back to
+   `guardrailFallbackText`) and always yields a real, non-partial, non-empty
+   final event.
+
+2. **Only one message is kept when Bedrock returns more than one text
+   block.** In practice a guardrail-blocked Converse response has sometimes
+   carried the same denial text across two content blocks. Rather than
+   guessing which one to keep, `guardrailBlockedStage` classifies the block
+   using `trace.ModelOutput`: empty means the guardrail denied the prompt
+   *before* the model ran (an "input"-stage block, with no generated text to
+   accompany it), non-empty means the model generated a response and the
+   guardrail denied *that* (an "output"-stage block, where any leaked
+   partial generation is expected to precede the final denial message).
+   `markGuardrailBlocked` uses this to pick the first part for an input
+   block or the last part for an output block; with no trace available
+   (caller didn't request one) it falls back to the first non-empty part.
+
+3. **The user turn that triggered the guardrail must be redacted from
+   history.** ADK stores the user's message before the model is ever called,
+   so it's already in history by the time the response comes back - nothing
+   about the *response* touches it. Left as-is, the next request replays
+   that same triggering text and Bedrock's guardrail fires on it again,
+   blocking every subsequent turn for the rest of the conversation (observed:
+   a single off-topic message locked up the whole session).
+   `redactBlockedInputs` runs as the first history-repair step in
+   `buildConverseInput` (before `repairMessageHistory` and
+   `trimFinalAssistantWhitespace`); it looks for an assistant turn whose
+   first text block starts with `guardrailMarker` and replaces the
+   *preceding* user turn's content with `"[User input redacted by
+   guardrail.]"`.
+
+`guardrailMarker` is a zero-width space (`"​"`) prepended to the first
+text part of a blocked response by `markGuardrailBlocked`. It's invisible
+when rendered but survives being stored and replayed as history, so
+`redactBlockedInputs` can recognize a blocked turn on a later request without
+hardcoding any particular guardrail's refusal wording - that wording is
+guardrail-config-specific and varies per Bedrock Guardrail, so it can't be
+matched literally.
+
+Together these keep the alternating user/assistant turn structure intact
+(no empty or dropped turns, which Bedrock and ADK both reject or mishandle)
+while ensuring the guardrail only fires once per offending input, and without
+editorializing over Bedrock's own guardrail message. This mirrors the
+approach used by the Strands framework (`guardrail_redact_input` /
+`guardrail_redact_output`).
 
 

@@ -152,18 +152,101 @@ func isList(v any) bool {
 	return ok
 }
 
-// dropEmptyMessages removes messages with no content blocks. These arise when
-// a Bedrock Guardrail blocks an assistant turn: ADK replays the empty response
-// as history on the next request, and Bedrock rejects requests that contain
-// empty-content turns.
-func dropEmptyMessages(messages []types.Message) []types.Message {
-	out := make([]types.Message, 0, len(messages))
-	for _, msg := range messages {
-		if len(msg.Content) > 0 {
-			out = append(out, msg)
+// guardrailMarker is an invisible (zero-width space) prefix stamped on the
+// first text block of a guardrail-blocked response (see markGuardrailBlocked
+// in response.go/stream.go). It lets redactBlockedInputs recognize a blocked
+// turn on a later request without hardcoding any particular guardrail's
+// refusal wording — Bedrock's actual guardrail message text (e.g. "Sorry,
+// the model cannot answer this question.") is guardrail-config-specific and
+// varies, so it can't be matched literally. The marker is invisible to users
+// (renders as nothing) but survives being stored and replayed as history.
+const guardrailMarker = "​"
+
+// guardrailFallbackText is used only when Bedrock's blocked response has no
+// content at all (empty message). Bedrock and ADK both reject/mishandle
+// empty-content turns (see B8), so something non-empty is required.
+const guardrailFallbackText = "[blocked by guardrail]"
+
+// guardrailBlockedStage reports which stage of the Converse guardrail
+// pipeline actually blocked the turn: "input" (the guardrail denied the
+// prompt before the model ever ran) or "output" (the model generated a
+// response and the guardrail denied that). trace.ModelOutput is the
+// reliable signal: it's only populated when the model actually produced
+// output for the guardrail to assess, so an empty ModelOutput means
+// generation never happened. Returns "" when trace is nil (the caller
+// didn't request a trace, so the stage can't be determined) or the turn
+// wasn't guardrail-blocked at all.
+func guardrailBlockedStage(trace *types.GuardrailTraceAssessment) string {
+	if trace == nil {
+		return ""
+	}
+	if len(trace.ModelOutput) == 0 {
+		return "input"
+	}
+	return "output"
+}
+
+// markGuardrailBlocked collapses parts (a guardrail-blocked response) down
+// to a single text part tagged with guardrailMarker, so a later request can
+// recognize this turn without altering the guardrail's actual message text.
+//
+// Collapsing to one part is deliberate, not just tagging in place: Bedrock
+// can return the same guardrail message across more than one content block
+// when both the input and output stages produced a denial message (or
+// duplicate blocks for the same stage), and passing all of them through
+// would display the identical message twice, back to back, with no
+// separator.
+//
+// stage (from guardrailBlockedStage) picks which occurrence to keep when
+// there's more than one text part: "input" keeps the first (the guardrail's
+// pre-generation denial message, which has no prior generated text to
+// follow it), "output" keeps the last (any generated text that slipped out
+// before the guardrail caught it is expected to precede the final blocked-
+// output message). An empty stage (no trace available) falls back to the
+// first non-empty part. Falls back to guardrailFallbackText when Bedrock
+// returned no text content at all.
+func markGuardrailBlocked(parts []*genai.Part, stage string) []*genai.Part {
+	var nonEmpty []*genai.Part
+	for _, p := range parts {
+		if p != nil && p.Text != "" {
+			nonEmpty = append(nonEmpty, p)
 		}
 	}
-	return out
+	if len(nonEmpty) == 0 {
+		return []*genai.Part{{Text: guardrailMarker + guardrailFallbackText}}
+	}
+
+	chosen := nonEmpty[0]
+	if stage == "output" {
+		chosen = nonEmpty[len(nonEmpty)-1]
+	}
+	return []*genai.Part{{Text: guardrailMarker + chosen.Text}}
+}
+
+// redactBlockedInputs replaces the user turn immediately preceding a
+// guardrail-blocked assistant turn (identified by guardrailMarker) with a
+// placeholder. The user message that triggered the guardrail is otherwise
+// still in history with its original content, and Bedrock re-evaluates it on
+// every subsequent request — re-blocking the conversation indefinitely.
+// Redacting it stops the re-triggering while keeping the alternating
+// user/assistant turn structure intact (mirrors Strands'
+// guardrail_redact_input=True).
+func redactBlockedInputs(messages []types.Message) []types.Message {
+	for i, msg := range messages {
+		if msg.Role != types.ConversationRoleAssistant || len(msg.Content) == 0 {
+			continue
+		}
+		text, ok := msg.Content[0].(*types.ContentBlockMemberText)
+		if !ok || !strings.HasPrefix(text.Value, guardrailMarker) {
+			continue
+		}
+		if i > 0 && messages[i-1].Role == types.ConversationRoleUser {
+			messages[i-1].Content = []types.ContentBlock{
+				&types.ContentBlockMemberText{Value: "[User input redacted by guardrail.]"},
+			}
+		}
+	}
+	return messages
 }
 
 // repairMessageHistory drops orphaned toolUse blocks (those without a

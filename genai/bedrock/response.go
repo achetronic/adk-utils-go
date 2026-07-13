@@ -37,6 +37,26 @@ func (m *Model) convertOutput(out *bedrockruntime.ConverseOutput) (*model.LLMRes
 		return nil, err
 	}
 
+	var guardrailTrace *types.GuardrailTraceAssessment
+	if out.Trace != nil {
+		guardrailTrace = out.Trace.Guardrail
+	}
+
+	// When a guardrail blocks the turn, tag it with an invisible marker
+	// rather than replacing the text: the actual guardrail message is
+	// preserved for display, while the marker lets a later request redact
+	// the triggering user turn (see redactBlockedInputs). guardrailBlockedStage
+	// picks the input- or output-stage message when Bedrock returned more
+	// than one (see markGuardrailBlocked). Content must stay non-nil and the
+	// turn non-partial: ADK's flow loop requires the last yielded event of a
+	// turn to be a final (non-partial) response, and a nil Content here
+	// would make ADK skip storing the event entirely, which for the
+	// streaming path can leave a dangling partial chunk as the last event
+	// and trip ADK's "last event is not final" internal error. See B8.
+	if out.StopReason == types.StopReasonGuardrailIntervened {
+		parts = markGuardrailBlocked(parts, guardrailBlockedStage(guardrailTrace))
+	}
+
 	resp := &model.LLMResponse{
 		Content: &genai.Content{
 			Role:  genai.RoleModel,
@@ -50,11 +70,6 @@ func (m *Model) convertOutput(out *bedrockruntime.ConverseOutput) (*model.LLMRes
 			PromptTokenCount:     int32derefOr(out.Usage.InputTokens),
 			CandidatesTokenCount: int32derefOr(out.Usage.OutputTokens),
 		}
-	}
-
-	var guardrailTrace *types.GuardrailTraceAssessment
-	if out.Trace != nil {
-		guardrailTrace = out.Trace.Guardrail
 	}
 	if meta := guardrailMetadata(out.StopReason, guardrailTrace); meta != nil {
 		resp.CustomMetadata = meta

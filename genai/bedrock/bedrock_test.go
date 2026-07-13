@@ -107,20 +107,89 @@ func TestRepairMessageHistory_DropsOrphanedToolUse(t *testing.T) {
 	}
 }
 
-func TestDropEmptyMessages(t *testing.T) {
+func TestGuardrailBlockedStage(t *testing.T) {
+	if got := guardrailBlockedStage(nil); got != "" {
+		t.Errorf("guardrailBlockedStage(nil) = %q, want \"\"", got)
+	}
+	// No ModelOutput: guardrail denied before generation ran.
+	if got := guardrailBlockedStage(&types.GuardrailTraceAssessment{}); got != "input" {
+		t.Errorf("guardrailBlockedStage(empty ModelOutput) = %q, want \"input\"", got)
+	}
+	// Non-empty ModelOutput: the model generated, then the guardrail denied it.
+	trace := &types.GuardrailTraceAssessment{ModelOutput: []string{"some generated text"}}
+	if got := guardrailBlockedStage(trace); got != "output" {
+		t.Errorf("guardrailBlockedStage(non-empty ModelOutput) = %q, want \"output\"", got)
+	}
+}
+
+func TestMarkGuardrailBlocked(t *testing.T) {
+	// Non-empty response: actual Bedrock message is preserved, just tagged.
+	parts := markGuardrailBlocked([]*genai.Part{{Text: "Sorry, the model cannot answer this question."}}, "")
+	if len(parts) != 1 {
+		t.Fatalf("len(parts) = %d, want 1", len(parts))
+	}
+	want := guardrailMarker + "Sorry, the model cannot answer this question."
+	if parts[0].Text != want {
+		t.Errorf("marked text = %q, want %q", parts[0].Text, want)
+	}
+
+	// Empty response: falls back to a marked placeholder.
+	parts = markGuardrailBlocked(nil, "")
+	if len(parts) != 1 || parts[0].Text != guardrailMarker+guardrailFallbackText {
+		t.Errorf("unexpected fallback parts: %#v", parts)
+	}
+
+	// Multiple text parts with an unknown stage: falls back to the first,
+	// matching the pre-B8-refinement behavior.
+	multi := []*genai.Part{{Text: "input denial message"}, {Text: "output denial message"}}
+	parts = markGuardrailBlocked(multi, "")
+	if len(parts) != 1 || parts[0].Text != guardrailMarker+"input denial message" {
+		t.Errorf("unknown-stage selection = %#v, want first part", parts)
+	}
+
+	// stage="input": keep the first part (the pre-generation denial).
+	parts = markGuardrailBlocked(multi, "input")
+	if len(parts) != 1 || parts[0].Text != guardrailMarker+"input denial message" {
+		t.Errorf("input-stage selection = %#v, want first part", parts)
+	}
+
+	// stage="output": keep the last part (any leaked generation precedes the
+	// final blocked-output message).
+	parts = markGuardrailBlocked(multi, "output")
+	if len(parts) != 1 || parts[0].Text != guardrailMarker+"output denial message" {
+		t.Errorf("output-stage selection = %#v, want last part", parts)
+	}
+}
+
+func TestRedactBlockedInputs(t *testing.T) {
 	messages := []types.Message{
-		{Role: types.ConversationRoleUser, Content: []types.ContentBlock{textBlock("hi")}},
-		{Role: types.ConversationRoleAssistant, Content: []types.ContentBlock{}}, // guardrail-blocked turn
-		{Role: types.ConversationRoleUser, Content: []types.ContentBlock{textBlock("hello again")}},
+		{Role: types.ConversationRoleUser, Content: []types.ContentBlock{textBlock("how do I hack this?")}},
+		{Role: types.ConversationRoleAssistant, Content: []types.ContentBlock{
+			textBlock(guardrailMarker + "Sorry, the model cannot answer this question."),
+		}},
+		{Role: types.ConversationRoleUser, Content: []types.ContentBlock{textBlock("ok, book a hotel")}},
 	}
 
-	result := dropEmptyMessages(messages)
+	result := redactBlockedInputs(messages)
 
-	if len(result) != 2 {
-		t.Fatalf("len(result) = %d, want 2 (empty assistant turn should be dropped)", len(result))
+	// Turn structure and count must be preserved.
+	if len(result) != 3 {
+		t.Fatalf("len(result) = %d, want 3 (turn structure must be preserved)", len(result))
 	}
-	if result[0].Role != types.ConversationRoleUser || result[1].Role != types.ConversationRoleUser {
-		t.Errorf("unexpected roles after dropping empty message: %v, %v", result[0].Role, result[1].Role)
+	// The user turn that triggered the guardrail must be redacted.
+	text, ok := result[0].Content[0].(*types.ContentBlockMemberText)
+	if !ok || text.Value != "[User input redacted by guardrail.]" {
+		t.Errorf("blocked user turn not redacted: %#v", result[0].Content[0])
+	}
+	// The guardrail-blocked assistant turn keeps its actual (marked) message.
+	assistantText, ok := result[1].Content[0].(*types.ContentBlockMemberText)
+	if !ok || assistantText.Value != guardrailMarker+"Sorry, the model cannot answer this question." {
+		t.Errorf("assistant turn was unexpectedly modified: %#v", result[1].Content[0])
+	}
+	// The follow-up user turn must be untouched.
+	followUp, ok := result[2].Content[0].(*types.ContentBlockMemberText)
+	if !ok || followUp.Value != "ok, book a hotel" {
+		t.Errorf("follow-up user turn was unexpectedly modified: %#v", result[2].Content[0])
 	}
 }
 
