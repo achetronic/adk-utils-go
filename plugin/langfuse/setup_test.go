@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -40,9 +41,10 @@ func TestSetupAppliesTracerProviderOptions(t *testing.T) {
 	recorder := tracetest.NewInMemoryExporter()
 
 	cfg := &Config{
-		PublicKey: "pk-test",
-		SecretKey: "sk-test",
-		Host:      "http://127.0.0.1:1", // never dialled: the batch exporter only flushes on shutdown
+		PublicKey:   "pk-test",
+		SecretKey:   "sk-test",
+		Host:        "http://127.0.0.1:1", // never dialled: the batch exporter only flushes on shutdown
+		ServiceName: "setup-test-service",
 		TracerProviderOptions: []sdktrace.TracerProviderOption{
 			sdktrace.WithIDGenerator(&fixedIDGenerator{traceID: wantTraceID}),
 			sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(recorder)),
@@ -71,6 +73,19 @@ func TestSetupAppliesTracerProviderOptions(t *testing.T) {
 	}
 	if spans[0].SpanContext.TraceID() != wantTraceID {
 		t.Errorf("recorded span trace ID = %s, want %s", spans[0].SpanContext.TraceID(), wantTraceID)
+	}
+
+	// The provider's resource must carry Setup's own wiring (service.name)
+	// merged over resource.Default() (telemetry.sdk.*).
+	resAttrs := make(map[attribute.Key]string)
+	for _, kv := range spans[0].Resource.Attributes() {
+		resAttrs[kv.Key] = kv.Value.Emit()
+	}
+	if got := resAttrs["service.name"]; got != "setup-test-service" {
+		t.Errorf("resource service.name = %q, want %q (Setup resource not applied)", got, "setup-test-service")
+	}
+	if _, ok := resAttrs["telemetry.sdk.name"]; !ok {
+		t.Errorf("resource is missing telemetry.sdk.name (resource.Default() not merged)")
 	}
 
 	// Shut down with an already-cancelled context so the OTLP batch exporter

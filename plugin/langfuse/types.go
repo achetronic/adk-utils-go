@@ -54,6 +54,17 @@ type Config struct {
 	// invocations land in a single Langfuse trace), a sampler to bound
 	// ingestion volume, or span limits.
 	//
+	// The options are applied after Setup's own resource and span processor,
+	// so an option with replace semantics (e.g. sdktrace.WithResource)
+	// overrides what Setup wired. The resource Setup wires is merged over
+	// resource.Default(), matching the ADK's default-path resource assembly.
+	//
+	// Caveat: when this field is set, the ADK receives a preconfigured trace
+	// provider and skips the extra OTLP trace exporters it would otherwise
+	// wire from the OTEL_EXPORTER_OTLP_ENDPOINT /
+	// OTEL_EXPORTER_OTLP_TRACES_ENDPOINT environment variables. Log exporters
+	// are unaffected.
+	//
 	// Programmatic only: this field cannot be populated from YAML/JSON
 	// configuration files. When empty, Setup behaves exactly as before.
 	TracerProviderOptions []sdktrace.TracerProviderOption `yaml:"-" json:"-"`

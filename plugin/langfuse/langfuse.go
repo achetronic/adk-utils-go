@@ -112,18 +112,31 @@ func Setup(cfg *Config) (runner.PluginConfig, func(context.Context) error, error
 	enricher := newSpanEnricher()
 	wrapped := &enrichingExporter{inner: exporter, enricher: enricher}
 
-	telemetryOpts := []adktelemetry.Option{
-		adktelemetry.WithSpanProcessors(sdktrace.NewBatchSpanProcessor(wrapped)),
-		adktelemetry.WithResource(res),
-	}
-	if len(cfg.TracerProviderOptions) > 0 {
+	// NewBatchSpanProcessor starts its export goroutine on construction, so
+	// each branch below builds its own processor: constructing one eagerly
+	// for the branch not taken would leak that goroutine.
+	var telemetryOpts []adktelemetry.Option
+	if len(cfg.TracerProviderOptions) == 0 {
+		telemetryOpts = []adktelemetry.Option{
+			adktelemetry.WithSpanProcessors(sdktrace.NewBatchSpanProcessor(wrapped)),
+			adktelemetry.WithResource(res),
+		}
+	} else {
 		// The ADK telemetry setup only exposes span processors and the
 		// resource. When the caller needs deeper control over the trace
 		// provider (ID generator, sampler, span limits, ...), build it here
-		// with the same exporter/resource wiring plus the caller's options,
-		// and hand the finished provider over instead.
+		// with the same exporter wiring plus the caller's options, and hand
+		// the finished provider over instead.
+		//
+		// Merging over resource.Default() mirrors the resource the ADK
+		// assembles on the default path (telemetry.sdk.* attributes,
+		// OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES environment variables).
+		tpRes, err := resource.Merge(resource.Default(), res)
+		if err != nil {
+			return runner.PluginConfig{}, nil, fmt.Errorf("langfuse: merge OTel resources: %w", err)
+		}
 		tpOpts := append([]sdktrace.TracerProviderOption{
-			sdktrace.WithResource(res),
+			sdktrace.WithResource(tpRes),
 			sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(wrapped)),
 		}, cfg.TracerProviderOptions...)
 		telemetryOpts = []adktelemetry.Option{

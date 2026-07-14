@@ -272,13 +272,21 @@ pluginCfg, shutdown, err := langfuse.Setup(&langfuse.Config{
     TracerProviderOptions: []sdktrace.TracerProviderOption{
         // myIDGenerator returns a trace ID derived from the run ID found in
         // ctx (fall back to random when absent), so every execution of the
-        // same logical run lands in the same Langfuse trace.
+        // same logical run lands in the same Langfuse trace. Only the trace
+        // ID may be deterministic — span IDs must stay random, or resumed
+        // executions would collide inside the shared trace.
         sdktrace.WithIDGenerator(myIDGenerator),
         // Optional: bound ingestion volume on high-traffic services.
         // sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1))),
     },
 })
 ```
+
+The options are applied after the resource and span processor `Setup` wires,
+so replace-semantics options (e.g. `sdktrace.WithResource`) override them.
+Because the ADK receives a preconfigured provider on this path, it skips the
+extra OTLP trace exporters it would otherwise wire from
+`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
 
 When the field is empty, `Setup` behaves exactly as before.
 
