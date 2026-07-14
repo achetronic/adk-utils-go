@@ -134,11 +134,13 @@ Both clients support:
 - Streaming and non-streaming responses
 - System instructions
 - Tool/function calling
-- Image inputs (base64)
+- Image inputs: inline bytes (`InlineData`, sent as base64) or remote URLs (`FileData`, passed through to the provider's image-URL field — nothing is downloaded or re-encoded)
 - Temperature, TopP, MaxOutputTokens, StopSequences
 - Extended thinking: classic budget API (`ThinkingBudgetTokens`) and adaptive effort API (`ThinkingEffort` + `ThinkingMode`)
 - Usage metadata
 - Custom HTTP headers (multi-value)
+
+Remote image URLs (`genai.Part.FileData`) are supported for image MIME types only — audio and documents still require uploaded bytes via `InlineData`. Anthropic accepts only publicly accessible `https` URLs; the OpenAI client also allows plain `http` for OpenAI-compatible gateways (Ollama, vLLM, ...). Invalid schemes and non-image MIME types fail with a clear error instead of being silently dropped.
 
 ## Session Service (Redis)
 
