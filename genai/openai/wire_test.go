@@ -100,3 +100,65 @@ func TestWireBody_NilFunctionResponse(t *testing.T) {
 		t.Errorf("tool content = %q, want \"{}\"", tool["content"])
 	}
 }
+
+// captureStreamBody is the streaming twin of captureBody: it points the model at
+// a fake SSE endpoint, fires one streaming request, and returns the JSON body
+// that hit the wire. Serves a minimal valid SSE stream so the accumulator drains
+// cleanly and generateStream yields its terminal LLMResponse.
+func captureStreamBody(t *testing.T, req *model.LLMRequest) map[string]any {
+	t.Helper()
+
+	var captured []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w,
+			"data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n"+
+				"data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"+
+				"data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n"+
+				"data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "gpt-test"})
+
+	for _, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			t.Fatalf("GenerateContent: %v", err)
+		}
+	}
+	if len(captured) == 0 {
+		t.Fatalf("server captured no request body")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(captured, &body); err != nil {
+		t.Fatalf("unmarshal captured body: %v", err)
+	}
+	return body
+}
+
+// On the wire, a streaming request must set stream_options.include_usage=true.
+// Without this opt-in the OpenAI server never emits the terminal usage chunk,
+// the ChatCompletionAccumulator's Usage stays zero, and buildStreamFinalResponse
+// yields empty UsageMetadata — leaving consumers no way to price the turn.
+func TestWireBody_StreamRequestsUsage(t *testing.T) {
+	body := captureStreamBody(t, &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{},
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+		},
+	})
+
+	if body["stream"] != true {
+		t.Fatalf("stream = %v, want true", body["stream"])
+	}
+	opts, ok := body["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options missing or not an object: %v", body["stream_options"])
+	}
+	if opts["include_usage"] != true {
+		t.Errorf("stream_options.include_usage = %v, want true", opts["include_usage"])
+	}
+}
