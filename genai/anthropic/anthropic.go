@@ -944,16 +944,18 @@ func convertInlineDataToBlock(data *genai.Blob) (*anthropic.ContentBlockParamUni
 // The FileURI is passed through verbatim as a remote URL source — nothing is downloaded
 // or base64-encoded. Only images are supported: Anthropic accepts a URL source for
 // images, whereas other media types require the bytes to be uploaded first (use
-// InlineData for those). Anthropic only fetches publicly accessible https URLs, so
-// other schemes are rejected here with a clear error instead of a provider-side 400.
-// Unsupported MIME types return an error, matching convertInlineDataToBlock's
-// fail-loud behaviour.
+// InlineData for those). Plain http URLs are allowed because the client also serves
+// Anthropic-compatible gateways via Config.BaseURL, which commonly fetch from local
+// http endpoints; anthropic.com itself only fetches publicly accessible https URLs
+// and enforces that on its side. Other schemes are rejected here with a clear error
+// instead of a provider-side 400. Unsupported MIME types return an error, matching
+// convertInlineDataToBlock's fail-loud behaviour.
 func convertFileDataToBlock(data *genai.FileData) (*anthropic.ContentBlockParamUnion, error) {
 	if data == nil {
 		return nil, fmt.Errorf("file data is nil")
 	}
-	if !strings.HasPrefix(data.FileURI, "https://") {
-		return nil, fmt.Errorf("file data URI must be a publicly accessible https URL for Anthropic, got %q", data.FileURI)
+	if !strings.HasPrefix(data.FileURI, "https://") && !strings.HasPrefix(data.FileURI, "http://") {
+		return nil, fmt.Errorf("file data URI must be an http(s) URL for Anthropic, got %q", data.FileURI)
 	}
 
 	switch data.MIMEType {

@@ -140,7 +140,7 @@ Both clients support:
 - Usage metadata
 - Custom HTTP headers (multi-value)
 
-Remote image URLs (`genai.Part.FileData`) are supported for image MIME types only — audio and documents still require uploaded bytes via `InlineData`. Anthropic accepts only publicly accessible `https` URLs; the OpenAI client also allows plain `http` for OpenAI-compatible gateways (Ollama, vLLM, ...). Invalid schemes and non-image MIME types fail with a clear error instead of being silently dropped.
+Remote image URLs (`genai.Part.FileData`) are supported for image MIME types only — audio and documents still require uploaded bytes via `InlineData`. The URI must be `http(s)`: plain `http` is allowed because both clients also serve API-compatible gateways (Ollama, vLLM, LiteLLM, ...) that commonly fetch from local http endpoints, while `anthropic.com` itself only fetches publicly accessible `https` URLs and enforces that server-side. Invalid schemes and non-image MIME types fail with a clear error instead of being silently dropped.
 
 ## Session Service (Redis)
 
