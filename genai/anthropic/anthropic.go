@@ -260,6 +260,8 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 
 			// Yield partial text content
 			switch eventVariant := event.AsAny().(type) {
+			case anthropic.MessageDeltaEvent:
+				mergeDeltaUsage(&message.Usage, eventVariant.Usage)
 			case anthropic.ContentBlockDeltaEvent:
 				switch deltaVariant := eventVariant.Delta.AsAny().(type) {
 				case anthropic.TextDelta:
@@ -309,6 +311,30 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 		llmResp.Partial = false
 		llmResp.TurnComplete = true
 		yield(llmResp, nil)
+	}
+}
+
+// mergeDeltaUsage folds the usage carried by a message_delta event into the
+// accumulated message's usage.
+//
+// The SDK's Message.Accumulate only copies output_tokens from deltas, but the
+// API reports the authoritative totals — including the prompt-caching split —
+// in the FINAL message_delta; the usage in message_start is a pre-generation
+// estimate. Some Anthropic-compatible gateways (e.g. new-api relaying an
+// OpenAI-protocol upstream) omit cache fields from message_start entirely and
+// only report them here, so without this merge cache hits read as zero and
+// input_tokens stays at the estimate. Fields absent from the wire are left
+// untouched (checked via JSON field presence), so responses whose deltas carry
+// only output_tokens keep the message_start values.
+func mergeDeltaUsage(usage *anthropic.Usage, delta anthropic.MessageDeltaUsage) {
+	if delta.JSON.InputTokens.Valid() {
+		usage.InputTokens = delta.InputTokens
+	}
+	if delta.JSON.CacheCreationInputTokens.Valid() {
+		usage.CacheCreationInputTokens = delta.CacheCreationInputTokens
+	}
+	if delta.JSON.CacheReadInputTokens.Valid() {
+		usage.CacheReadInputTokens = delta.CacheReadInputTokens
 	}
 }
 

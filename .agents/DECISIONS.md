@@ -314,3 +314,19 @@ fabricates input. It is the caller's responsibility not to end on an assistant
 turn unless the target model supports prefill. Note `repairMessageHistory` can
 leave a history ending in assistant (after dropping a trailing orphan tool_use);
 that is the most likely way to hit this. Observed on `claude-sonnet-4-6`.
+
+### A11 - Final message_delta usage is authoritative (merged field-by-field)
+
+The SDK's `Message.Accumulate` only copies `output_tokens` from message_delta
+events, but the current Messages API defines the delta usage fields
+(`input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`) as
+cumulative totals. Anthropic itself already sends the true input-side split in
+message_start, so ignoring the delta fields is harmless there — but
+Anthropic-compatible endpoints built on engines that only know usage at end of
+stream put an estimate in message_start and the authoritative numbers
+(including the prompt-caching split) only in the final message_delta. Alibaba
+Cloud Model Studio documents exactly this shape. Without the merge, cache
+reads report as zero and `PromptTokenCount` stays at the estimate.
+`mergeDeltaUsage` folds delta usage into the accumulated message only for
+fields present on the wire (JSON field validity), so sparse deltas — the
+classic `output_tokens`-only shape — keep the message_start values.
