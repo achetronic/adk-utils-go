@@ -21,6 +21,7 @@ import (
 	"github.com/achetronic/adk-utils-go/genai/common"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/shared"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
@@ -142,6 +143,12 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			yield(nil, err)
 			return
 		}
+
+		// Opt into the final usage chunk. Without stream_options.include_usage the
+		// server never emits it, the accumulator's Usage stays zero, and
+		// buildStreamFinalResponse yields a terminal LLMResponse with empty
+		// UsageMetadata — leaving consumers no way to price a streamed turn.
+		params.StreamOptions.IncludeUsage = param.NewOpt(true)
 
 		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
