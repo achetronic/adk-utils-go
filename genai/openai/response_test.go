@@ -505,20 +505,21 @@ func TestBuildStreamFinalResponse_WithReasoningContent(t *testing.T) {
 	})
 }
 
-// convertUsageMetadata must map CompletionTokensDetails.ReasoningTokens to
-// ThoughtsTokenCount. This is the only path through which billing/usage
-// systems downstream (e.g. Langfuse) can see how many hidden reasoning
-// tokens a turn consumed. Dropping the field silently — as the previous
-// implementation did — makes cost dashboards under-count and removes the
-// only signal callers have that a reasoning model actually reasoned.
-func TestConvertUsageMetadata_WithReasoningTokens(t *testing.T) {
-	t.Run("reasoning tokens map to ThoughtsTokenCount", func(t *testing.T) {
+// convertUsageMetadata must preserve the provider's detailed token buckets.
+// This is the only path through which billing/usage systems downstream (e.g.
+// Langfuse) can apply reasoning-output and cache-read prices. Dropping either
+// field silently makes cost dashboards inaccurate.
+func TestConvertUsageMetadata_WithTokenDetails(t *testing.T) {
+	t.Run("reasoning and cached tokens map to genai details", func(t *testing.T) {
 		usage := openai.CompletionUsage{
 			PromptTokens:     10,
 			CompletionTokens: 50,
 			TotalTokens:      60,
 			CompletionTokensDetails: openai.CompletionUsageCompletionTokensDetails{
 				ReasoningTokens: 42,
+			},
+			PromptTokensDetails: openai.CompletionUsagePromptTokensDetails{
+				CachedTokens: 8,
 			},
 		}
 		got := convertUsageMetadata(usage)
@@ -528,6 +529,9 @@ func TestConvertUsageMetadata_WithReasoningTokens(t *testing.T) {
 		if got.ThoughtsTokenCount != 42 {
 			t.Errorf("ThoughtsTokenCount = %d, want 42", got.ThoughtsTokenCount)
 		}
+		if got.CachedContentTokenCount != 8 {
+			t.Errorf("CachedContentTokenCount = %d, want 8", got.CachedContentTokenCount)
+		}
 		// Ensure the rest of the mapping is unchanged: a regression that
 		// rewrites the field assignments could silently zero one of these.
 		if got.PromptTokenCount != 10 || got.CandidatesTokenCount != 50 || got.TotalTokenCount != 60 {
@@ -535,11 +539,11 @@ func TestConvertUsageMetadata_WithReasoningTokens(t *testing.T) {
 		}
 	})
 
-	t.Run("zero reasoning tokens emit zero ThoughtsTokenCount", func(t *testing.T) {
+	t.Run("missing details emit zero detail counts", func(t *testing.T) {
 		// Providers that don't emit CompletionTokensDetails (Ollama,
-		// vanilla GPT-4o) must keep ThoughtsTokenCount=0. genai's
-		// `omitempty` then drops the field on serialisation so the
-		// observability backends don't see a misleading zero metric.
+		// vanilla GPT-4o) must keep detail counts at zero. genai's
+		// `omitempty` then drops the fields on serialisation so the
+		// observability backends don't see misleading zero metrics.
 		usage := openai.CompletionUsage{
 			PromptTokens:     1,
 			CompletionTokens: 2,
@@ -551,6 +555,9 @@ func TestConvertUsageMetadata_WithReasoningTokens(t *testing.T) {
 		}
 		if got.ThoughtsTokenCount != 0 {
 			t.Errorf("ThoughtsTokenCount = %d, want 0", got.ThoughtsTokenCount)
+		}
+		if got.CachedContentTokenCount != 0 {
+			t.Errorf("CachedContentTokenCount = %d, want 0", got.CachedContentTokenCount)
 		}
 	})
 }

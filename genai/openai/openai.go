@@ -776,20 +776,21 @@ func convertInlineDataToPart(data *genai.Blob) (*openai.ChatCompletionContentPar
 // CompletionTokensDetails.ReasoningTokens is the count of hidden reasoning
 // tokens billed as output tokens by OpenAI reasoning models (o-series,
 // gpt-5.x) and by OpenAI-compatible providers exposing reasoning (DeepSeek,
-// Kimi K2/K2.6, Qwen3-Thinking). It is a documented part of the official
-// Chat Completions schema, so we always map it to genai's ThoughtsTokenCount
-// regardless of whether the provider also returns reasoning text. When the
-// provider does not emit reasoning tokens the field is zero, and genai
-// serialisation omits it via `omitempty`.
+// Kimi K2/K2.6, Qwen3-Thinking). PromptTokensDetails.CachedTokens is the
+// cache-hit subset of PromptTokens and is billed at a distinct input rate.
+// Both are documented parts of the official Chat Completions schema, so we
+// always map them to their genai counterparts. When a provider does not emit
+// a detail, the field is zero and genai serialisation omits it via `omitempty`.
 func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
 	if usage.TotalTokens == 0 {
 		return nil
 	}
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:     int32(usage.PromptTokens),
-		CandidatesTokenCount: int32(usage.CompletionTokens),
-		TotalTokenCount:      int32(usage.TotalTokens),
-		ThoughtsTokenCount:   int32(usage.CompletionTokensDetails.ReasoningTokens),
+		PromptTokenCount:        int32(usage.PromptTokens),
+		CandidatesTokenCount:    int32(usage.CompletionTokens),
+		TotalTokenCount:         int32(usage.TotalTokens),
+		ThoughtsTokenCount:      int32(usage.CompletionTokensDetails.ReasoningTokens),
+		CachedContentTokenCount: int32(usage.PromptTokensDetails.CachedTokens),
 	}
 }
 
