@@ -46,27 +46,26 @@ type Config struct {
 	// enabled, which is required for the public Langfuse Cloud endpoints.
 	Insecure bool `yaml:"insecure,omitempty" json:"insecure,omitempty"`
 
-	// TracerProviderOptions are additional options applied when constructing
-	// the underlying trace provider, on top of the exporter and resource that
-	// Setup wires itself. Use it to inject settings the default wiring does
-	// not expose, such as a custom ID generator (e.g. deterministic trace IDs
-	// derived from an external request/run ID, so paused-and-resumed agent
-	// invocations land in a single Langfuse trace), a sampler to bound
-	// ingestion volume, or span limits.
+	// TracerProviderOptions are extra options for the trace provider Setup
+	// builds, on top of the exporter and resource it wires itself. Use it
+	// for settings the default wiring does not expose: a custom ID generator
+	// (for example one that derives the trace ID from your own run ID, so a
+	// paused agent resuming in another HTTP request stays in one Langfuse
+	// trace), a sampler to cap ingestion volume, or span limits.
 	//
-	// The options are applied after Setup's own resource and span processor,
-	// so an option with replace semantics (e.g. sdktrace.WithResource)
+	// The options run after Setup's own resource and span processor, so an
+	// option with replace semantics (sdktrace.WithResource, for example)
 	// overrides what Setup wired. The resource Setup wires is merged over
-	// resource.Default(), matching the ADK's default-path resource assembly.
+	// resource.Default(), matching what the ADK assembles on its default
+	// path.
 	//
-	// Caveat: when this field is set, the ADK receives a preconfigured trace
-	// provider and skips the extra OTLP trace exporters it would otherwise
-	// wire from the OTEL_EXPORTER_OTLP_ENDPOINT /
-	// OTEL_EXPORTER_OTLP_TRACES_ENDPOINT environment variables. Log exporters
-	// are unaffected.
+	// Caveat: with this field set the ADK receives a finished trace provider
+	// and skips the extra OTLP trace exporters it would otherwise wire from
+	// the OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+	// environment variables. Log exporters are unaffected.
 	//
-	// Programmatic only: this field cannot be populated from YAML/JSON
-	// configuration files. When empty, Setup behaves exactly as before.
+	// Programmatic only: the field cannot be set from YAML/JSON config
+	// files. When empty, Setup behaves exactly as before.
 	TracerProviderOptions []sdktrace.TracerProviderOption `yaml:"-" json:"-"`
 }
 

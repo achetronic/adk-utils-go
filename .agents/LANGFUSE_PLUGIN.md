@@ -106,6 +106,12 @@ type Config struct {
     Environment string `yaml:"environment" json:"environment"` // Optional: deployment environment tag
     Release     string `yaml:"release" json:"release"`         // Optional: version tag
     ServiceName string `yaml:"serviceName,omitempty"`          // Optional: OTel service.name (default: "langfuse-adk")
+    Insecure    bool   `yaml:"insecure,omitempty"`             // Optional: plain-HTTP OTLP export (self-hosted/local only)
+
+    // Programmatic only (yaml:"-" json:"-"): extra options for the trace
+    // provider Setup builds, e.g. a custom ID generator or a sampler.
+    // See "two construction branches" under Setup() below.
+    TracerProviderOptions []sdktrace.TracerProviderOption
 }
 ```
 
@@ -132,7 +138,10 @@ Typical usage: HTTP middleware sets these before passing the context to the ADK 
 
 1. Creates an OTLP/HTTP exporter pointed at `{host}/api/public/otel/v1/traces` with Basic Auth
 2. Wraps it in `enrichingExporter`
-3. Creates ADK telemetry providers with a `BatchSpanProcessor`
+3. Creates ADK telemetry providers. Two construction branches:
+   - **Default** (`TracerProviderOptions` empty): passes a `BatchSpanProcessor` and the resource to the ADK, which builds the trace provider itself.
+   - **Custom** (`TracerProviderOptions` set): builds the trace provider in the plugin instead, because the ADK options only expose span processors and the resource. Wiring: resource merged over `resource.Default()` (mirrors the ADK's default-path assembly), the same `BatchSpanProcessor`, then the caller's options appended (so replace-semantics options win). The finished provider goes to the ADK via `WithTracerProvider`; on this path the ADK skips the OTLP trace exporters it would otherwise add from `OTEL_EXPORTER_OTLP_*` env vars.
+   - Each branch constructs its own `BatchSpanProcessor`. The processor starts its export goroutine on construction, so building one for the branch not taken would leak it.
 4. Sets the global OTel `TracerProvider`
 5. Creates the ADK plugin with all four callbacks
 6. Returns `(runner.PluginConfig, shutdown, error)`

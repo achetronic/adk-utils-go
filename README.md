@@ -253,40 +253,40 @@ runnr, _ := runner.New(runner.Config{
 
 ### Custom TracerProvider Options
 
-`Config.TracerProviderOptions` (programmatic only, not readable from YAML/JSON)
-lets you inject trace-provider settings the default wiring does not expose —
-a custom ID generator, a sampler, span limits — while keeping the exporter and
-resource that `Setup` wires itself.
+`Config.TracerProviderOptions` passes extra options to the trace provider
+that `Setup` builds: a custom ID generator, a sampler, span limits. The
+exporter and resource that `Setup` wires itself stay in place. The field is
+programmatic only; it cannot be set from YAML/JSON.
 
-The flagship use case is deterministic trace IDs derived from an external
-request/run ID, following Langfuse's recommended external-ID correlation
-pattern (`create_trace_id(seed=...)` in the Python SDK). Agents that pause for
-human input and resume in a later HTTP request otherwise produce a fresh
-random trace ID per request, splitting one logical run across several
-Langfuse traces:
+The main use for this is pinning trace IDs to your own run IDs, so a paused
+agent that resumes in another HTTP request stays in one Langfuse trace.
+Without it, every request starts a fresh random trace ID and one logical run
+gets split across several traces. Langfuse recommends the same external-ID
+correlation pattern in its docs (`create_trace_id(seed=...)` in the Python
+SDK):
 
 ```go
 pluginCfg, shutdown, err := langfuse.Setup(&langfuse.Config{
     PublicKey: os.Getenv("LANGFUSE_PUBLIC_KEY"),
     SecretKey: os.Getenv("LANGFUSE_SECRET_KEY"),
     TracerProviderOptions: []sdktrace.TracerProviderOption{
-        // myIDGenerator returns a trace ID derived from the run ID found in
-        // ctx (fall back to random when absent), so every execution of the
-        // same logical run lands in the same Langfuse trace. Only the trace
-        // ID may be deterministic — span IDs must stay random, or resumed
-        // executions would collide inside the shared trace.
+        // myIDGenerator derives the trace ID from the run ID in ctx
+        // (random when absent), so every execution of the same logical
+        // run lands in the same Langfuse trace. Keep span IDs random:
+        // resumed executions would otherwise collide inside the shared
+        // trace.
         sdktrace.WithIDGenerator(myIDGenerator),
-        // Optional: bound ingestion volume on high-traffic services.
+        // Optional: cap ingestion volume on high-traffic services.
         // sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.1))),
     },
 })
 ```
 
-The options are applied after the resource and span processor `Setup` wires,
-so replace-semantics options (e.g. `sdktrace.WithResource`) override them.
-Because the ADK receives a preconfigured provider on this path, it skips the
-extra OTLP trace exporters it would otherwise wire from
-`OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
+The options run after the resource and span processor `Setup` wires, so an
+option with replace semantics (`sdktrace.WithResource`, for example) wins
+over what `Setup` set. Note that on this path the ADK receives a finished
+provider and skips the extra OTLP trace exporters it would otherwise wire
+from `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
 
 When the field is empty, `Setup` behaves exactly as before.
 
