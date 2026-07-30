@@ -147,7 +147,7 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 		// Opt into the final usage chunk. Without stream_options.include_usage the
 		// server never emits it, the accumulator's Usage stays zero, and
 		// buildStreamFinalResponse yields a terminal LLMResponse with empty
-		// UsageMetadata — leaving consumers no way to price a streamed turn.
+		// UsageMetadata - leaving consumers no way to price a streamed turn.
 		params.StreamOptions.IncludeUsage = param.NewOpt(true)
 
 		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
@@ -348,16 +348,16 @@ func (m *Model) applyGenerationConfig(params *openai.ChatCompletionNewParams, cf
 		}
 	}
 
-	// ToolConfig → tool_choice
+	// ToolConfig -> tool_choice
 	//
 	// Maps genai.FunctionCallingConfig.Mode to OpenAI's tool_choice:
-	//   ModeAuto → "auto"   (default behaviour; model may or may not call a tool)
-	//   ModeAny  → "required" (model MUST call a tool; use for agentic loops
+	//   ModeAuto -> "auto"   (default behaviour; model may or may not call a tool)
+	//   ModeAny  -> "required" (model MUST call a tool; use for agentic loops
 	//                         that can't handle a plain-text reply)
-	//   ModeNone → "none"   (tools disabled for this call even if provided)
+	//   ModeNone -> "none"   (tools disabled for this call even if provided)
 	//
 	// When AllowedFunctionNames is set with ModeAny, OpenAI's equivalent is a
-	// named function choice — we pick the first name since OpenAI's
+	// named function choice - we pick the first name since OpenAI's
 	// tool_choice accepts only one specific function, not a list. Callers who
 	// need a multi-function allowlist should rely on ModeAny plus prompt-level
 	// instructions to pick within the allowed set.
@@ -773,14 +773,12 @@ func convertInlineDataToPart(data *genai.Blob) (*openai.ChatCompletionContentPar
 
 // convertUsageMetadata converts OpenAI usage stats to genai format.
 //
-// CompletionTokensDetails.ReasoningTokens is the count of hidden reasoning
-// tokens billed as output tokens by OpenAI reasoning models (o-series,
-// gpt-5.x) and by OpenAI-compatible providers exposing reasoning (DeepSeek,
-// Kimi K2/K2.6, Qwen3-Thinking). PromptTokensDetails.CachedTokens is the
-// cache-hit subset of PromptTokens and is billed at a distinct input rate.
-// Both are documented parts of the official Chat Completions schema, so we
-// always map them to their genai counterparts. When a provider does not emit
-// a detail, the field is zero and genai serialisation omits it via `omitempty`.
+// ReasoningTokens (billed as output tokens by o-series, gpt-5.x and
+// reasoning-exposing compatible providers) maps to ThoughtsTokenCount;
+// CachedTokens (the cache-hit subset of PromptTokens, billed at a distinct
+// input rate) maps to CachedContentTokenCount. Both are documented Chat
+// Completions fields, so they are always mapped. A provider that omits a
+// detail leaves it at zero, and genai's omitempty drops it on the wire.
 func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
 	if usage.TotalTokens == 0 {
 		return nil
@@ -797,22 +795,14 @@ func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentRe
 // extractReasoningContent reads the non-standard "reasoning_content" field
 // from the SDK's raw JSON envelope.
 //
-// The OpenAI Chat Completions schema does NOT include a "reasoning_content"
-// field — for OpenAI's own reasoning models (o-series, gpt-5.x) the reasoning
-// text is hidden and only the token count is reported (via
-// CompletionTokensDetails.ReasoningTokens). Reasoning *text* is only
-// available through the Responses API, which this adapter does not use.
+// Chat Completions does not define this field: OpenAI's own reasoning models
+// hide the reasoning text and report only the token count. Compatible
+// providers (DeepSeek-R1, Kimi K2/K2.6, Qwen3-Thinking) add it on
+// choices[].message and choices[].delta. openai-go does not type it but
+// keeps it in the raw JSON, reachable via RawJSON().
 //
-// However, multiple OpenAI-compatible providers (DeepSeek-R1, Kimi K2/K2.6,
-// Qwen3-Thinking, etc.) extend the response with a "reasoning_content"
-// field on choices[].message and choices[].delta. openai-go does not type
-// this field but preserves it in JSON.raw, which is reachable via the
-// generated RawJSON() accessor. Parsing the raw envelope is the documented
-// way to read non-standard fields in this SDK.
-//
-// Returns "" if the field is absent, empty, or the JSON cannot be parsed —
-// callers should treat empty as "no reasoning content emitted" and skip
-// adding a thought Part.
+// Returns "" when the field is absent, empty, or unparseable; callers treat
+// empty as "no reasoning content" and skip the thought Part.
 func extractReasoningContent(rawJSON string) string {
 	if rawJSON == "" {
 		return ""

@@ -19,9 +19,9 @@ import (
 
 // kubeAgentConversation simulates a Kubernetes agent session:
 //   - User asks something
-//   - Model calls kubectl_get_pods → huge JSON response
-//   - Model calls kubectl_describe_pod → huge JSON response
-//   - Model calls kubectl_get_logs → huge text response
+//   - Model calls kubectl_get_pods -> huge JSON response
+//   - Model calls kubectl_describe_pod -> huge JSON response
+//   - Model calls kubectl_get_logs -> huge text response
 //   - Model responds with analysis
 //   - Repeat
 func kubeAgentConversation(rounds int) []*genai.Content {
@@ -217,7 +217,7 @@ func mixedConversation() []*genai.Content {
 			Name: "http_get", Response: map[string]any{"status": 200, "body": `{"status":"healthy","latency_p99":"180ms","error_rate":"0.001"}`},
 		}}}},
 
-		textContent("model", "Migration cancelled. The API health has recovered — P99 latency is back to 180ms and error rate dropped to 0.1%. I recommend adding the index with CREATE INDEX CONCURRENTLY during the next maintenance window."),
+		textContent("model", "Migration cancelled. The API health has recovered - P99 latency is back to 180ms and error rate dropped to 0.1%. I recommend adding the index with CREATE INDEX CONCURRENTLY during the next maintenance window."),
 	}
 }
 
@@ -423,8 +423,8 @@ func copyContents(src []*genai.Content) []*genai.Content {
 }
 
 // buildCodingAgentConversation simulates a coding assistant that reads files,
-// runs tests, edits code — alternating between text discussion and tool use.
-// Each round: user asks → model thinks (text) → model calls tool → result →
+// runs tests, edits code - alternating between text discussion and tool use.
+// Each round: user asks -> model thinks (text) -> model calls tool -> result ->
 // model analyzes (text). This is the best-case for safeSplitIndex because
 // there are text messages between tool chains.
 func buildCodingAgentConversation(rounds int) []*genai.Content {
@@ -618,7 +618,7 @@ func TestCompactionSimulation(t *testing.T) {
 	t.Log("\n=== TOKEN INCREASE / NO-REDUCTION DIAGNOSTIC ===\n")
 	for _, r := range results {
 		if r.summarized && r.tokensAfter >= r.tokensBefore {
-			t.Logf("  DIAG: [%s] strategy=%s — tokens went from %d to %d (floor-hit: oldMessages=%d, summary replaced 1 msg but added summary text)",
+			t.Logf("  DIAG: [%s] strategy=%s - tokens went from %d to %d (floor-hit: oldMessages=%d, summary replaced 1 msg but added summary text)",
 				r.scenario, r.strategy, r.tokensBefore, r.tokensAfter, r.oldMessages)
 		}
 	}
@@ -637,14 +637,14 @@ func TestCompactionSimulation(t *testing.T) {
 		}
 	}
 	if unfitCount == 0 {
-		t.Log("  (none — all compacted scenarios fit within context window)")
+		t.Log("  (none - all compacted scenarios fit within context window)")
 	}
 
 	// --- Report: how the floor affected things ---
 	t.Log("\n=== FLOOR-HIT ANALYSIS ===\n")
 	for _, r := range results {
 		if r.summarized && r.oldMessages <= 1 {
-			t.Logf("  FLOOR-HIT: [%s] strategy=%s — only %d message(s) summarized out of %d total (%.1f%% token reduction)",
+			t.Logf("  FLOOR-HIT: [%s] strategy=%s - only %d message(s) summarized out of %d total (%.1f%% token reduction)",
 				r.scenario, r.strategy, r.oldMessages, r.contentsBefore, r.reductionPct)
 		}
 	}
@@ -773,7 +773,7 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 		if r.fits {
 			fit = "YES"
 		}
-		t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d→%d | %s",
+		t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d->%d | %s",
 			r.scenario, r.attempts, r.tokensBefore, r.tokensAfter,
 			r.reductionPct, r.contentsBefore, r.contentsAfter, fit)
 	}
@@ -796,7 +796,7 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 		if r.fits {
 			fit = "YES"
 		}
-		t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d→%d | %s",
+		t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d->%d | %s",
 			r.scenario, r.attempts, r.tokensBefore, r.tokensAfter,
 			r.reductionPct, r.contentsBefore, r.contentsAfter, fit)
 	}
@@ -819,13 +819,13 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 		if r.fits {
 			fit = "YES"
 		}
-		t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d→%d | %s",
+		t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d->%d | %s",
 			r.scenario, r.attempts, r.tokensBefore, r.tokensAfter,
 			r.reductionPct, r.contentsBefore, r.contentsAfter, fit)
 	}
 
 	// =====================================================================
-	// PART 4: The real kube scenario — what size responses break things?
+	// PART 4: The real kube scenario - what size responses break things?
 	// =====================================================================
 	t.Log("\n\n=== PART 4: KUBE-LIKE CONVERSATIONS WITH VARYING RESPONSE SIZE ===\n")
 	t.Logf("  %-35s | %8s | %10s | %10s | %8s | %7s | %s",
@@ -843,14 +843,14 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 			if r.fits {
 				fit = "YES"
 			}
-			t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d→%d | %s",
+			t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d->%d | %s",
 				r.scenario, r.attempts, r.tokensBefore, r.tokensAfter,
 				r.reductionPct, r.contentsBefore, r.contentsAfter, fit)
 		}
 	}
 
 	// =====================================================================
-	// PART 5: Single giant response — the absolute worst case
+	// PART 5: Single giant response - the absolute worst case
 	// =====================================================================
 	t.Log("\n\n=== PART 5: SINGLE GIANT TOOL RESPONSE ===\n")
 	t.Logf("  %-35s | %8s | %10s | %10s | %8s | %7s | %s",
@@ -877,7 +877,7 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 			if r.fits {
 				fit = "YES"
 			}
-			t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d→%d | %s",
+			t.Logf("  %-35s | %8d | %10d | %10d | %7.1f%% | %4d->%d | %s",
 				r.scenario, r.attempts, r.tokensBefore, r.tokensAfter,
 				r.reductionPct, r.contentsBefore, r.contentsAfter, fit)
 		}
@@ -889,11 +889,11 @@ func TestCompactionInvestigation_RetryRoundsAndGiantResponses(t *testing.T) {
 // TestTimingGap_CalibratedHeuristicPreventsOverflow simulates the exact
 // scenario where stale real tokens alone would miss a context overflow:
 //
-//	Step N:   LLM sees 140k tokens → AfterModel persists 140k, heuristic was 70k
+//	Step N:   LLM sees 140k tokens -> AfterModel persists 140k, heuristic was 70k
 //	Tool:     Returns 80k-char response (≈20k heuristic tokens, ≈40k real tokens)
 //	Step N+1: BeforeModel has req with 140k real + 40k new tool = 180k actual.
-//	          Old tokenCount: returns 140k (stale) → 140k < 180k threshold → NO compaction → BOOM
-//	          New tokenCount: calibrated = (70k+20k) * (140k/70k) = 180k → triggers compaction → SAFE
+//	          Old tokenCount: returns 140k (stale) -> 140k < 180k threshold -> NO compaction -> BOOM
+//	          New tokenCount: calibrated = (70k+20k) * (140k/70k) = 180k -> triggers compaction -> SAFE
 //
 // This test verifies the calibrated heuristic correctly inflates the
 // current heuristic estimate using the correction factor from the previous
@@ -954,7 +954,7 @@ func TestTimingGap_CalibratedHeuristicPreventsOverflow(t *testing.T) {
 		t.Fatalf("test setup broken: stale real tokens (%d) already >= threshold (%d)", realTokensAtStepN, threshold)
 	}
 	if calibrated < threshold {
-		t.Logf("NOTE: calibrated (%d) < threshold (%d) — in this test scenario the growth is small enough", calibrated, threshold)
+		t.Logf("NOTE: calibrated (%d) < threshold (%d) - in this test scenario the growth is small enough", calibrated, threshold)
 	}
 
 	t.Logf("Context window=%d, threshold=%d, stale_real=%d, calibrated=%d",

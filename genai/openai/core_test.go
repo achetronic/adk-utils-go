@@ -13,7 +13,7 @@ import (
 
 // convertSchema is the strongly-typed path used by ResponseSchema. We assert
 // on structural equality (a map[string]any tree) rather than serialised JSON
-// because Go's json.Marshal happens to sort map keys alphabetically — relying
+// because Go's json.Marshal happens to sort map keys alphabetically - relying
 // on that ordering implicitly would couple the test to an implementation
 // detail of the standard library that future Go versions don't have to
 // preserve.
@@ -235,7 +235,7 @@ func TestLowercaseTypes(t *testing.T) {
 // normalizeToolCallID hashes IDs longer than OpenAI's 40-char limit and
 // remembers the mapping so denormalize can recover the original. Short IDs
 // pass through untouched. The exact length of the shortened ID is part of
-// the contract — OpenAI rejects anything beyond 40 chars — so we assert on
+// the contract - OpenAI rejects anything beyond 40 chars - so we assert on
 // the boundary explicitly.
 func TestNormalizeToolCallID(t *testing.T) {
 	const limit = 40

@@ -17,7 +17,7 @@ const (
 
 // CrushRegistry implements ModelRegistry using catwalk's embedded model
 // database. All model metadata (context windows, max tokens, costs) is
-// compiled into the binary — no network calls, no background goroutines.
+// compiled into the binary - no network calls, no background goroutines.
 //
 // Usage:
 //

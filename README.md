@@ -12,7 +12,7 @@ This repository provides production-ready implementations for:
 - **Memory Tools**: Toolsets for agent-controlled memory operations
 - **Artifact Storage**: Filesystem-based artifact persistence with versioning
 - **Context Guard**: Automatic context window management with LLM-powered summarization
-- **Langfuse**: Observability plugin — traces every LLM call to [Langfuse](https://langfuse.com) with full prompt/response payloads and token usage
+- **Langfuse**: Observability plugin: traces every LLM call to [Langfuse](https://langfuse.com) with full prompt/response payloads and token usage
 
 ## Structure
 
@@ -277,11 +277,11 @@ ctx = langfuse.WithTraceMetadata(ctx, map[string]string{"tenant": "acme"})
 
 | Field | Required | Default | Description |
 |---|---|---|---|
-| `PublicKey` | Yes | — | Langfuse project public key (Basic Auth user) |
-| `SecretKey` | Yes | — | Langfuse project secret key (Basic Auth pass) |
+| `PublicKey` | Yes |: | Langfuse project public key (Basic Auth user) |
+| `SecretKey` | Yes |: | Langfuse project secret key (Basic Auth pass) |
 | `Host` | No | `https://cloud.langfuse.com` | Langfuse server URL |
-| `Environment` | No | — | Deployment environment tag |
-| `Release` | No | — | Application version tag |
+| `Environment` | No |: | Deployment environment tag |
+| `Release` | No |: | Application version tag |
 | `ServiceName` | No | `langfuse-adk` | OTel `service.name` resource attribute |
 | `Insecure` | No | `false` | Disable TLS for the OTLP/HTTP exporter (for self-hosted plain-HTTP instances) |
 
@@ -289,7 +289,7 @@ Use `cfg.IsEnabled()` to conditionally skip setup when credentials are absent.
 
 ## Context Guard Plugin
 
-Automatic context window management that prevents conversations from exceeding the LLM's token limit. It works as an ADK `BeforeModelCallback` plugin — before every LLM call, it checks whether the conversation is approaching the limit and summarizes older messages to make room.
+Automatic context window management that prevents conversations from exceeding the LLM's token limit. It works as an ADK `BeforeModelCallback` plugin: before every LLM call, it checks whether the conversation is approaching the limit and summarizes older messages to make room.
 
 ### Strategies
 
@@ -300,15 +300,13 @@ Automatic context window management that prevents conversations from exceeding t
 
 ### Setup
 
-The plugin requires a `ModelRegistry` to look up context window sizes. A built-in `CrushRegistry` is provided that fetches model metadata from [Crush's provider.json](https://raw.githubusercontent.com/charmbracelet/crush/main/internal/agent/hyper/provider.json) and refreshes every 6 hours:
+The plugin requires a `ModelRegistry` to look up context window sizes. The built-in `CrushRegistry` ships catwalk's embedded model database, compiled into the binary: no network calls and no lifecycle to manage.
 
 ```go
 import "github.com/achetronic/adk-utils-go/plugin/contextguard"
 
-// 1. Start the registry (built-in, fetches from Crush)
+// 1. Create the registry (built-in, embedded model database)
 registry := contextguard.NewCrushRegistry()
-registry.Start(ctx)
-defer registry.Stop()
 
 // 2. Create the guard and add agents
 guard := contextguard.New(registry)
@@ -326,20 +324,20 @@ Per-agent options are available via functional options:
 ```go
 guard := contextguard.New(registry)
 
-// Threshold strategy (default) — summarizes when tokens approach the limit
+// Threshold strategy (default): summarizes when tokens approach the limit
 guard.Add("assistant", llmModel)
 
-// Sliding window — summarizes after N turns regardless of token count
+// Sliding window: summarizes after N turns regardless of token count
 guard.Add("researcher", llmResearcher, contextguard.WithSlidingWindow(30))
 
-// Manual context window override — bypasses the registry for this agent
+// Manual context window override: bypasses the registry for this agent
 guard.Add("writer", llmWriter, contextguard.WithMaxTokens(1_000_000))
 
-// Custom compaction retry limit (default: 3) — applies to both strategies
+// Custom compaction retry limit (default: 3): applies to both strategies
 guard.Add("analyst", llmAnalyst, contextguard.WithMaxCompactionAttempts(5))
 ```
 
-Multi-agent setup is the same API — just call `Add` multiple times:
+Multi-agent setup is the same API: just call `Add` multiple times:
 
 ```go
 guard := contextguard.New(registry)

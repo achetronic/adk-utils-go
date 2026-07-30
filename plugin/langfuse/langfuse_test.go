@@ -327,7 +327,7 @@ func TestContentToText(t *testing.T) {
 		}}}, `[tool_call: search({"q":"foo"})]`},
 		{"function response", &genai.Content{Parts: []*genai.Part{{
 			FunctionResponse: &genai.FunctionResponse{Name: "search", Response: map[string]any{"ok": true}},
-		}}}, `[tool_response: search → {"ok":true}]`},
+		}}}, `[tool_response: search -> {"ok":true}]`},
 		{"mixed", &genai.Content{Parts: []*genai.Part{
 			{Text: "hi"},
 			{FunctionCall: &genai.FunctionCall{Name: "f", Args: map[string]any{}}},

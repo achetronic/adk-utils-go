@@ -18,12 +18,12 @@ import (
 //
 // This simulator models the EXACT ADK execution flow as implemented in
 // internal/llminternal/base_flow.go. Every test that uses simulateSession
-// exercises the full pipeline: BeforeModelCallback → LLM → AfterModelCallback,
+// exercises the full pipeline: BeforeModelCallback -> LLM -> AfterModelCallback,
 // including re-entry for tool results.
 //
 // ADK flow per user turn:
 //
-//   OUTER: for { runOneStep() → if IsFinalResponse() → break }
+//   OUTER: for { runOneStep() -> if IsFinalResponse() -> break }
 //
 //   runOneStep():
 //     1. preprocess: create fresh req, ContentsRequestProcessor rebuilds
@@ -33,9 +33,9 @@ import (
 //        2b. Model.GenerateContent
 //        2c. AfterModelCallback (ContextGuard: persistRealTokens)
 //     3. postprocess
-//     4. handleFunctionCalls → execute tools → yield function response event
-//     5. if function calls exist → LOOP (another runOneStep)
-//        else → IsFinalResponse=true → BREAK
+//     4. handleFunctionCalls -> execute tools -> yield function response event
+//     5. if function calls exist -> LOOP (another runOneStep)
+//        else -> IsFinalResponse=true -> BREAK
 //
 // Key invariants we model:
 //   - Each runOneStep creates a FRESH req with contents from session history
@@ -146,7 +146,7 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 	// rebuilds from session events and applies injectSummary.
 
 	// runLLMStep simulates one complete ADK runOneStep iteration:
-	//   preprocess → BeforeModelCallback → LLM → AfterModelCallback
+	//   preprocess -> BeforeModelCallback -> LLM -> AfterModelCallback
 	runLLMStep := func(turnIdx int, label string) {
 		// Step 1: ADK creates a fresh LLMRequest and ContentsRequestProcessor
 		// rebuilds Contents from the full session event history.
@@ -176,7 +176,7 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 			result.compactions++
 			if tokensAfter >= tokensBefore {
 				result.loopDetected = true
-				t.Logf("Turn %d [%s]: LOOP — compaction had no effect: %d >= %d",
+				t.Logf("Turn %d [%s]: LOOP - compaction had no effect: %d >= %d",
 					turnIdx, label, tokensAfter, tokensBefore)
 			}
 		}
@@ -185,9 +185,9 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 		// req.Contents only affects this LLM call. ContentsRequestProcessor
 		// will rebuild from ALL events next time, and injectSummary strips
 		// the already-summarized events using the watermark. We do NOT
-		// update `contents` here — it represents the immutable event history.
+		// update `contents` here - it represents the immutable event history.
 
-		// Step 3: Compute "real" token count — what the LLM would actually see.
+		// Step 3: Compute "real" token count - what the LLM would actually see.
 		// This is the ground truth for overflow detection.
 		realTokensForLLM := int(float64(tokensAfter) * cfg.tokenRatio)
 		if realTokensForLLM > result.maxTokensSeen {
@@ -195,11 +195,11 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 		}
 		if realTokensForLLM > cfg.contextWindow {
 			result.overflowed = true
-			t.Logf("Turn %d [%s]: OVERFLOW — real tokens %d > context window %d (heuristic=%d, ratio=%.1f)",
+			t.Logf("Turn %d [%s]: OVERFLOW - real tokens %d > context window %d (heuristic=%d, ratio=%.1f)",
 				turnIdx, label, realTokensForLLM, cfg.contextWindow, tokensAfter, cfg.tokenRatio)
 		}
 
-		// Step 4: AfterModelCallback — persists the real PromptTokenCount
+		// Step 4: AfterModelCallback - persists the real PromptTokenCount
 		// that the provider reports. In real ADK this fires after every
 		// GenerateContent call, including after tool-result processing.
 		if cfg.hasUsageMetadata {
@@ -215,7 +215,7 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 	}
 
 	for i, turn := range turns {
-		// User sends a message → appended to session events by ADK runner
+		// User sends a message -> appended to session events by ADK runner
 		userParts := []*genai.Part{{Text: turn.userMessage}}
 		for _, att := range turn.inlineData {
 			userParts = append(userParts, &genai.Part{
@@ -233,8 +233,8 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 		if len(turn.toolCalls) > 0 {
 			if turn.sequential {
 				// Sequential tool chain: each tool call is a separate ADK
-				// runOneStep iteration. Model calls tool A → gets result →
-				// calls tool B → gets result → ... → returns text.
+				// runOneStep iteration. Model calls tool A -> gets result ->
+				// calls tool B -> gets result -> ... -> returns text.
 				for k, tc := range turn.toolCalls {
 					// Model response with single FunctionCall
 					contents = append(contents, &genai.Content{
@@ -296,7 +296,7 @@ func simulateSession(t *testing.T, cfg sessionConfig, turns []turnConfig) sessio
 			}
 		}
 
-		// Model produces final text response → IsFinalResponse()=true → BREAK
+		// Model produces final text response -> IsFinalResponse()=true -> BREAK
 		respSize := turn.responseSize
 		if respSize <= 0 {
 			respSize = 120
@@ -795,7 +795,7 @@ func TestStress_200k_100Turns_MixedWorkload(t *testing.T) {
 }
 
 // ==========================================================================
-// 8k CONTEXT WINDOW TESTS (small model — the hard case)
+// 8k CONTEXT WINDOW TESTS (small model - the hard case)
 // ==========================================================================
 
 func TestStress_8k_NormalConversation(t *testing.T) {
@@ -1156,7 +1156,7 @@ func TestStress_CompactionNoInfiniteLoop(t *testing.T) {
 }
 
 // ==========================================================================
-// BRUTAL STRESS TESTS — extreme scenarios designed to break compaction
+// BRUTAL STRESS TESTS - extreme scenarios designed to break compaction
 // ==========================================================================
 
 // TestBrutal_8k_ToolResponseBiggerThanWindow tests a tool response that
@@ -1218,7 +1218,7 @@ func TestBrutal_8k_EveryTurnExceedsWindow(t *testing.T) {
 // a token ratio up to the default correction factor (2.0x). Without
 // UsageMetadata the system can never learn the real ratio, so the default
 // factor must cover the gap. Ratio=2.0 is the maximum that 2.0x default
-// factor can handle — any higher requires provider calibration data.
+// factor can handle - any higher requires provider calibration data.
 func TestBrutal_8k_NoUsageMetadata_HighRatio(t *testing.T) {
 	turns := make([]turnConfig, 20)
 	for i := range turns {
@@ -1251,7 +1251,7 @@ func TestBrutal_8k_NoUsageMetadata_HighRatio(t *testing.T) {
 // (2.0) and the provider doesn't report UsageMetadata, the system has no
 // way to learn the real ratio. It still compacts but may briefly overflow.
 // This test verifies the system survives (doesn't loop or crash) and that
-// compaction still fires — even if overflow occurs.
+// compaction still fires - even if overflow occurs.
 func TestBrutal_8k_NoUsageMetadata_BeyondDefault(t *testing.T) {
 	turns := make([]turnConfig, 15)
 	for i := range turns {
@@ -1315,7 +1315,7 @@ func TestBrutal_8k_150Turns(t *testing.T) {
 }
 
 // TestBrutal_200k_ConsecutiveMassiveBursts tests multiple consecutive
-// turns each with massive tool output — the worst case for accumulation.
+// turns each with massive tool output - the worst case for accumulation.
 func TestBrutal_200k_ConsecutiveMassiveBursts(t *testing.T) {
 	turns := make([]turnConfig, 10)
 	for i := range turns {
@@ -1591,7 +1591,7 @@ func TestBrutal_8k_CorrectionFactorDrift(t *testing.T) {
 }
 
 // TestBrutal_8k_EmptyToolResponses tests tool calls that return empty
-// or near-empty responses — the FunctionResponse wrapper still costs tokens.
+// or near-empty responses - the FunctionResponse wrapper still costs tokens.
 func TestBrutal_8k_EmptyToolResponses(t *testing.T) {
 	turns := make([]turnConfig, 25)
 	for i := range turns {
@@ -1727,7 +1727,7 @@ func TestBrutal_8k_JSON_Heavy_ToolResponses(t *testing.T) {
 // SEQUENTIAL TOOL CHAIN TESTS
 //
 // These test the scenario where a model chains tool calls sequentially:
-// call tool A → get result → call tool B → get result → ... → text.
+// call tool A -> get result -> call tool B -> get result -> ... -> text.
 // Each tool call is a separate ADK runOneStep iteration, so
 // BeforeModelCallback fires before each one. This exercises the compaction
 // system much harder than parallel calls because context grows step-by-step.
@@ -1804,7 +1804,7 @@ func TestBrutal_200k_SequentialToolChain_LargeResponses(t *testing.T) {
 }
 
 // TestBrutal_8k_SequentialChain_NoUsageMetadata tests sequential tool
-// chains without calibration data — the hardest case for the heuristic.
+// chains without calibration data - the hardest case for the heuristic.
 func TestBrutal_8k_SequentialChain_NoUsageMetadata(t *testing.T) {
 	turns := make([]turnConfig, 10)
 	for i := range turns {
@@ -1838,7 +1838,7 @@ func TestBrutal_8k_SequentialChain_NoUsageMetadata(t *testing.T) {
 }
 
 // ==========================================================================
-// TOOL DEFINITIONS TESTS — verify that tool schemas are counted in the
+// TOOL DEFINITIONS TESTS - verify that tool schemas are counted in the
 // heuristic and compaction fires before overflow.
 // ==========================================================================
 
@@ -2009,7 +2009,7 @@ func TestBrutal_200k_ToolDefinitionsHighRatio(t *testing.T) {
 }
 
 // ==========================================================================
-// INLINE DATA TESTS — verify that InlineData (images, PDFs, audio, video)
+// INLINE DATA TESTS - verify that InlineData (images, PDFs, audio, video)
 // is counted in the heuristic.
 // ==========================================================================
 
@@ -2071,7 +2071,7 @@ func TestStress_8k_InlineSmallImages(t *testing.T) {
 }
 
 // TestBrutal_200k_LargeInlineDocuments tests large inline documents (e.g.
-// PDFs converted to base64). A 500KB PDF is ~125k heuristic tokens — a
+// PDFs converted to base64). A 500KB PDF is ~125k heuristic tokens - a
 // single attachment can nearly fill a 200k window.
 func TestBrutal_200k_LargeInlineDocuments(t *testing.T) {
 	turns := []turnConfig{
@@ -2104,7 +2104,7 @@ func TestBrutal_200k_LargeInlineDocuments(t *testing.T) {
 }
 
 // TestBrutal_200k_MultipleInlinePerTurn tests turns with multiple inline
-// attachments — simulating a user pasting several screenshots at once.
+// attachments - simulating a user pasting several screenshots at once.
 func TestBrutal_200k_MultipleInlinePerTurn(t *testing.T) {
 	turns := make([]turnConfig, 8)
 	for i := range turns {
@@ -2243,7 +2243,7 @@ func TestBrutal_8k_ToolDefsAndInlineCombined(t *testing.T) {
 }
 
 // ==========================================================================
-// REAL-WORLD USE CASE TESTS — production patterns from singleshot tests
+// REAL-WORLD USE CASE TESTS - production patterns from singleshot tests
 // ported to the multi-turn simulator for full ADK flow validation.
 //
 // These replicate the exact tool patterns from kubeAgentConversation,
@@ -2253,8 +2253,8 @@ func TestBrutal_8k_ToolDefsAndInlineCombined(t *testing.T) {
 // ==========================================================================
 
 // --- Kubernetes Agent Pattern ---
-// Each turn: user asks → model calls kubectl_get_pods (huge JSON) →
-// kubectl_describe_pod (huge text) → kubectl_get_logs (huge text) → model responds.
+// Each turn: user asks -> model calls kubectl_get_pods (huge JSON) ->
+// kubectl_describe_pod (huge text) -> kubectl_get_logs (huge text) -> model responds.
 // Matches kubeAgentConversation from singleshot tests.
 
 func TestStress_200k_KubeAgent(t *testing.T) {
@@ -2600,8 +2600,8 @@ func TestBrutal_8k_PureToolStorm_50Turns(t *testing.T) {
 }
 
 // --- Coding Agent Pattern ---
-// Each turn: user asks → model thinks (text response) → reads file → analyzes →
-// edits file → runs tests → model summarizes. Sequential tool chains.
+// Each turn: user asks -> model thinks (text response) -> reads file -> analyzes ->
+// edits file -> runs tests -> model summarizes. Sequential tool chains.
 // Matches buildCodingAgentConversation from singleshot tests.
 
 func TestStress_200k_CodingAgent(t *testing.T) {

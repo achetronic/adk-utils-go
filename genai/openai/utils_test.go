@@ -11,8 +11,8 @@ import (
 )
 
 // schemaTypeToString is the mapping that ResponseSchema and other strongly
-// typed paths rely on. JSON Schema is case-sensitive — uppercase types are
-// invalid — so we have to assert each one explicitly. Unknown types must
+// typed paths rely on. JSON Schema is case-sensitive - uppercase types are
+// invalid - so we have to assert each one explicitly. Unknown types must
 // degrade to "string" rather than empty/error to avoid sending a schema with
 // an empty "type" field, which OpenAI rejects.
 func TestSchemaTypeToString(t *testing.T) {
@@ -42,7 +42,7 @@ func TestSchemaTypeToString(t *testing.T) {
 // convertRole is intentionally minimal: it only renames "model" to
 // "assistant" and passes everything else through untouched. The OpenAI SDK
 // validates roles upstream, so this adapter shouldn't second-guess unknown
-// values — it should hand them off as-is.
+// values - it should hand them off as-is.
 func TestConvertRole(t *testing.T) {
 	cases := []struct {
 		role string
@@ -116,7 +116,7 @@ func TestJoinTexts(t *testing.T) {
 	}
 }
 
-// parseJSONArgs must never return nil — agent code assumes the args map is
+// parseJSONArgs must never return nil - agent code assumes the args map is
 // always safe to index. Invalid JSON, empty input, and the literal "null"
 // must all map to an empty map rather than propagate the parse error.
 func TestParseJSONArgs(t *testing.T) {
@@ -142,7 +142,7 @@ func TestParseJSONArgs(t *testing.T) {
 }
 
 // extractText concatenates only the text parts of a Content with newlines.
-// Non-text parts must be skipped — they have no string representation we'd
+// Non-text parts must be skipped - they have no string representation we'd
 // want appearing inside an OpenAI message body.
 func TestExtractText(t *testing.T) {
 	cases := []struct {

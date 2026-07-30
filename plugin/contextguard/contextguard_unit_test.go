@@ -568,7 +568,7 @@ func TestInjectSummary_AddsSummary(t *testing.T) {
 func TestInjectSummary_NoDuplicate(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
-			textContent("user", "[Previous conversation summary]\nold summary\n[End of summary — conversation continues below]"),
+			textContent("user", "[Previous conversation summary]\nold summary\n[End of summary - conversation continues below]"),
 			textContent("user", "hello"),
 		},
 	}
@@ -1252,7 +1252,7 @@ func makeLargeToolResultContent(name string, size int) *genai.Content {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Fix 1 — safeSplitIndex must never regress to 0
+// Tests: Fix 1 - safeSplitIndex must never regress to 0
 // ---------------------------------------------------------------------------
 
 func TestSafeSplitIndex_AllToolCalls_NeverReturnsZero(t *testing.T) {
@@ -1366,7 +1366,7 @@ func TestThresholdStrategy_IterativeCompaction(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Fix 2 — findSplitIndex must count FunctionCall/FunctionResponse tokens
+// Tests: Fix 2 - findSplitIndex must count FunctionCall/FunctionResponse tokens
 // ---------------------------------------------------------------------------
 
 func TestFindSplitIndex_ToolCallsCountTokens(t *testing.T) {
@@ -1418,7 +1418,7 @@ func TestFindSplitIndex_ToolCallsCountTokens(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: End-to-end — threshold strategy compacts all-tool conversations
+// Tests: End-to-end - threshold strategy compacts all-tool conversations
 // ---------------------------------------------------------------------------
 
 func TestThresholdStrategy_AllToolCalls_StillCompacts(t *testing.T) {
@@ -1498,7 +1498,7 @@ func TestSlidingWindowStrategy_AllToolCalls_StillCompacts(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Proposal 5.1 — Real token counts via AfterModelCallback
+// Tests: Proposal 5.1 - Real token counts via AfterModelCallback
 // ---------------------------------------------------------------------------
 
 func TestPersistAndLoadRealTokens(t *testing.T) {
@@ -1739,7 +1739,7 @@ func TestThresholdStrategy_UsesRealTokens(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Full summary — threshold always summarizes everything (no recent tail)
+// Tests: Full summary - threshold always summarizes everything (no recent tail)
 // ---------------------------------------------------------------------------
 
 func TestThresholdStrategy_NoRecentTail(t *testing.T) {
@@ -1777,7 +1777,7 @@ func TestThresholdStrategy_NoRecentTail(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Proposal 5.3 — Continuation context injection
+// Tests: Proposal 5.3 - Continuation context injection
 // ---------------------------------------------------------------------------
 
 func TestInjectContinuation_WithUserContent(t *testing.T) {
@@ -1857,7 +1857,7 @@ func TestThresholdStrategy_InjectsContinuation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: Proposal 5.4 — Todo preservation in summary prompt
+// Tests: Proposal 5.4 - Todo preservation in summary prompt
 // ---------------------------------------------------------------------------
 
 func TestLoadTodos_Empty(t *testing.T) {
@@ -1964,7 +1964,7 @@ func TestPluginConfig_HasAfterModelCallback(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: End-to-end — real tokens trigger compaction that heuristic misses
+// Tests: End-to-end - real tokens trigger compaction that heuristic misses
 // ---------------------------------------------------------------------------
 
 func TestThresholdStrategy_RealTokens_TriggersWhereHeuristicFails(t *testing.T) {
@@ -1975,8 +1975,8 @@ func TestThresholdStrategy_RealTokens_TriggersWhereHeuristicFails(t *testing.T) 
 
 	// Create a request where len/4 estimates ~50k tokens but "real" is 130k.
 	// With maxTokens=150k, threshold = 150k - 30k = 120k.
-	// Heuristic: 50k < 120k → no compaction.
-	// Real: 130k >= 120k → compaction.
+	// Heuristic: 50k < 120k -> no compaction.
+	// Real: 130k >= 120k -> compaction.
 	req := &model.LLMRequest{
 		Model:    "gpt-4o",
 		Contents: makeLargeConversation(50_000),

@@ -59,7 +59,7 @@ func TagsFromContext(ctx context.Context) []string {
 // langfuse.trace.metadata.<key> span attribute per entry.
 //
 // Multiple callers can cooperate by reading, copying, and extending the
-// existing map — the context itself is immutable so no mutex is needed.
+// existing map - the context itself is immutable so no mutex is needed.
 func WithTraceMetadata(ctx context.Context, metadata map[string]string) context.Context {
 	return context.WithValue(ctx, traceMetadataKey, metadata)
 }

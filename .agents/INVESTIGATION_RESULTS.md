@@ -6,18 +6,18 @@
 
 ---
 
-## Part 1: Original approach — split with recent tail (historical)
+## Part 1: Original approach: split with recent tail (historical)
 
-> **Note**: This section documents the original behaviour before Proposal 5. The threshold strategy no longer keeps a recent tail — it always summarizes everything. These results explain *why* the recent tail approach was abandoned.
+> **Note**: This section documents the original behaviour before Proposal 5. The threshold strategy no longer keeps a recent tail: it always summarizes everything. These results explain *why* the recent tail approach was abandoned.
 
 ### Retry Rounds vs `kube-3rounds / 8k ctx`
 
 | Scenario | Attempts | Tokens Before | Tokens After | Reduction | Contents | Fits? |
 |---|---|---|---|---|---|---|
-| kube-3r/8k/attempts=1 | 1 | 24,126 | 8,068 | 66.6% | 24→9 | NO |
-| kube-3r/8k/attempts=3 | 3 | 24,126 | 8,068 | 66.6% | 24→9 | NO |
-| kube-3r/8k/attempts=10 | 10 | 24,126 | 8,068 | 66.6% | 24→9 | NO |
-| kube-3r/8k/attempts=20 | 20 | 24,126 | 8,068 | 66.6% | 24→9 | NO |
+| kube-3r/8k/attempts=1 | 1 | 24,126 | 8,068 | 66.6% | 24->9 | NO |
+| kube-3r/8k/attempts=3 | 3 | 24,126 | 8,068 | 66.6% | 24->9 | NO |
+| kube-3r/8k/attempts=10 | 10 | 24,126 | 8,068 | 66.6% | 24->9 | NO |
+| kube-3r/8k/attempts=20 | 20 | 24,126 | 8,068 | 66.6% | 24->9 | NO |
 
 **Conclusion**: More retry rounds provided zero benefit. The 9 remaining recent messages (~8k tokens from 3 tool_call/tool_response pairs) were untouched by compaction. This was the fundamental flaw: the recent tail is irreducible.
 
@@ -39,12 +39,12 @@
 
 The original design kept ~20% of the context window as verbatim recent messages. This meant:
 1. A single large tool response in the recent window could exceed the budget alone.
-2. Retry loops only re-compacted already-compacted older content — the recent window was never touched.
+2. Retry loops only re-compacted already-compacted older content: the recent window was never touched.
 3. The system failed deterministically for any context window where one round of tool responses exceeded the threshold.
 
 ---
 
-## Part 2: Current approach — full summary (Crush-style)
+## Part 2: Current approach: full summary (Crush-style)
 
 The threshold strategy now summarizes the **entire** conversation. After compaction, `req.Contents` is exactly:
 
@@ -67,11 +67,11 @@ Post-compaction result is always `summary (~maxOutputTokens) + continuation (~10
 
 ### Summarization input is safe too
 
-The summarization prompt renders tool results as `[tool X returned a result]` — raw payloads are not included. So even a conversation with 500k of JSON tool responses produces a summarization input of manageable size (tool calls listed as one-liners).
+The summarization prompt renders tool results as `[tool X returned a result]`: raw payloads are not included. So even a conversation with 500k of JSON tool responses produces a summarization input of manageable size (tool calls listed as one-liners).
 
 ---
 
-## Part 3: Timing gap — calibrated heuristic
+## Part 3: Timing gap: calibrated heuristic
 
 ### The problem
 
@@ -79,11 +79,11 @@ ContextGuard uses `BeforeModelCallback` (before the LLM call) to check tokens, b
 
 ```
 Step N:
-  BeforeModelCallback → check tokens → LLM call → AfterModelCallback (persist PromptTokenCount)
-  → Tool executes → result appended to session
+  BeforeModelCallback -> check tokens -> LLM call -> AfterModelCallback (persist PromptTokenCount)
+  -> Tool executes -> result appended to session
 
 Step N+1:
-  preprocess (builds req with new tool results) → BeforeModelCallback → reads stale PromptTokenCount from N
+  preprocess (builds req with new tool results) -> BeforeModelCallback -> reads stale PromptTokenCount from N
 ```
 
 If the tool returned a massive response, `req` at step N+1 is larger than what was measured at step N. Using the stale `PromptTokenCount` directly would miss the growth.
@@ -109,9 +109,9 @@ return max(real, calibrated)
 ```
 
 **Why this works**:
-- `currentHeuristic` tracks growth (tool results added → more text → higher heuristic).
+- `currentHeuristic` tracks growth (tool results added -> more text -> higher heuristic).
 - `correction` translates heuristic tokens into real tokens using the last known ratio.
-- `max(real, calibrated)` ensures we never undercount — if the request didn't grow, `real` dominates; if it grew, `calibrated` dominates.
+- `max(real, calibrated)` ensures we never undercount: if the request didn't grow, `real` dominates; if it grew, `calibrated` dominates.
 - The correction factor is floored at 1.0 to prevent the calibrated value from being smaller than the raw heuristic.
 - If no real tokens exist (first turn), a conservative default factor of 2.5 is applied.
 
@@ -150,7 +150,7 @@ BeforeModelCallback (step N)
 │   ├── correction = max(1.0, real / lastHeuristic)
 │   ├── calibrated = currentHeuristic × correction
 │   └── return max(real, calibrated)
-├── if totalTokens < threshold → pass through
+├── if totalTokens < threshold -> pass through
 ├── if totalTokens ≥ threshold:
 │   ├── summarize(entire conversation)               ← LLM call with structured prompt
 │   ├── replaceSummary(req, summary, nil)             ← req = [summary]
@@ -158,12 +158,12 @@ BeforeModelCallback (step N)
 │   └── persistSummary(ctx, summary, totalTokens)
 └── persistLastHeuristic(ctx, estimateTokens(req))    ← for next step's calibration
 
-LLM call (step N) → response with PromptTokenCount
+LLM call (step N) -> response with PromptTokenCount
 
 AfterModelCallback (step N)
 └── persistRealTokens(ctx, PromptTokenCount)          ← for next step's calibration
 
-Tool execution → results appended to session → loop back to step N+1
+Tool execution -> results appended to session -> loop back to step N+1
 ```
 
 ### Key design decisions
@@ -176,18 +176,18 @@ Tool execution → results appended to session → loop back to step N+1
 | Calibrated heuristic instead of raw `max(real, heuristic)` | Raw heuristic underestimates by 2-3× for structured content. The correction factor from the previous call bridges this gap. |
 | Correction factor floored at 1.0 | Prevents the heuristic from being *reduced* when real tokens are lower (e.g., after compaction). |
 | Correction factor capped at 5.0 | Prevents a single anomalous turn (JSON-heavy tool schemas) from producing a disproportionate correction that persists. |
-| Default factor 2.5 for first turn | Conservative — triggers compaction slightly early rather than risking overflow on the very first turn without calibration data. Accounts for tool definitions and structured content overhead not fully captured by len/4. |
+| Default factor 2.5 for first turn | Conservative: triggers compaction slightly early rather than risking overflow on the very first turn without calibration data. Accounts for tool definitions and structured content overhead not fully captured by len/4. |
 | Continuation message includes original user request | Prevents the agent from asking the user to repeat themselves after compaction. |
 | Todo preservation in summary prompt | Maintains task tracking state across compaction boundaries. |
 | Truncate conversation before summarization | Prevents the summarization prompt itself from exceeding the summarizer LLM's context window. |
 | Fallback summary on LLM failure | If summarization fails, a mechanical summary (first 200 chars of each message) is used instead of passing through the bloated request. |
 | Count tool definitions in heuristic | Tool declarations (name, description, JSON schemas) are sent with every request. Without counting them, the heuristic can underestimate by 8x+ for tool-heavy agents. |
 | Count InlineData in heuristic | `InlineData` is a generic `*genai.Blob` (images, PDFs, audio, video). A single base64-encoded image can be tens of thousands of tokens invisible to the old heuristic. |
-| Buffer boundary `>=` not `>` | 200k windows should use the fixed 20k buffer. `>` excluded 200k exactly, applying 20% (40k) instead — an unintended 20k threshold reduction. |
+| Buffer boundary `>=` not `>` | 200k windows should use the fixed 20k buffer. `>` excluded 200k exactly, applying 20% (40k) instead: an unintended 20k threshold reduction. |
 
 ---
 
-## Part 4: Hardening — production-readiness improvements
+## Part 4: Hardening: production-readiness improvements
 
 ### Problem: three failure modes identified in production testing
 
@@ -237,7 +237,7 @@ if err != nil {
 }
 ```
 
-`buildFallbackSummary()` concatenates the first 200 chars of each message — mechanical but guaranteed to succeed and be small. The session continues with degraded summary quality rather than crashing.
+`buildFallbackSummary()` concatenates the first 200 chars of each message: mechanical but guaranteed to succeed and be small. The session continues with degraded summary quality rather than crashing.
 
 ### Stress test validation
 

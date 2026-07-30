@@ -36,11 +36,11 @@ Wraps the real OTLP `SpanExporter`. At export time, for every span named `genera
 1. Looks up the span's parent ID (which is the `invoke_agent` span ID)
 2. Pops the oldest pending `llmCall` for that ID (FIFO queue)
 3. Injects extra attributes into the span:
-   - `gcp.vertex.agent.llm_request` — full serialised prompt
-   - `gcp.vertex.agent.llm_response` — model output text
-   - `gen_ai.request.model` — model identifier
-   - `gen_ai.usage.input_tokens` — prompt token count
-   - `gen_ai.usage.output_tokens` — completion token count
+   - `gcp.vertex.agent.llm_request`: full serialised prompt
+   - `gcp.vertex.agent.llm_response`: model output text
+   - `gen_ai.request.model`: model identifier
+   - `gen_ai.usage.input_tokens`: prompt token count
+   - `gen_ai.usage.output_tokens`: completion token count
 
 The injection is done via `enrichedSpan`, a thin wrapper around `sdktrace.ReadOnlySpan` that appends extra attributes without mutating the original span.
 
@@ -67,12 +67,12 @@ ADK plugin callbacks see the `invoke_agent` span in their context, but the `gene
                     │         │                    │
                     │         ▼                    │
                     │  enrichingExporter           │
-                    │  (matches parent ID →        │
-                    │   pops pending llmCall →     │
+                    │  (matches parent ID ->        │
+                    │   pops pending llmCall ->     │
                     │   injects attributes)        │
                     │         │                    │
                     │         ▼                    │
-                    │  OTLP HTTP → Langfuse        │
+                    │  OTLP HTTP -> Langfuse        │
                     └─────────────────────────────┘
 ```
 
@@ -84,15 +84,15 @@ The plugin is safe for all ADK agent topologies:
 |---|---|
 | Single agent | Keys are `invocationID` (branch is empty) |
 | Sequential delegation (`transfer_to_agent`) | Each agent gets its own `invoke_agent` span with a unique span ID. The stack tracks nesting. |
-| `SequentialAgent` / `LoopAgent` | Same as delegation — sequential execution, stack-based tracking |
+| `SequentialAgent` / `LoopAgent` | Same as delegation: sequential execution, stack-based tracking |
 | `ParallelAgent` | Each sub-agent gets a distinct `Branch()` value. The `branchKey` function combines `invocationID + ":" + branch` so concurrent sub-agents never collide. |
 
 ## Concurrency
 
 All mutable state lives in `spanEnricher` behind a single `sync.Mutex`. The state is request-scoped and ephemeral:
 
-- `agentSpans`: per-branch stack of active `invoke_agent` spans — pushed in `beforeAgent`, popped in `afterAgent`
-- `pending`: FIFO queue of `llmCall` per span ID — enqueued in `beforeModel`, updated in `afterModel`, dequeued in `ExportSpans`
+- `agentSpans`: per-branch stack of active `invoke_agent` spans: pushed in `beforeAgent`, popped in `afterAgent`
+- `pending`: FIFO queue of `llmCall` per span ID: enqueued in `beforeModel`, updated in `afterModel`, dequeued in `ExportSpans`
 
 Each HTTP request's lifecycle is handled entirely by one server instance (spans don't hop across replicas), so this is safe for multi-replica deployments.
 
@@ -214,9 +214,9 @@ Langfuse calculates costs when it receives `gen_ai.usage.input_tokens` and `gen_
 
 The plugin adds these direct dependencies beyond what adk-utils-go already has:
 
-- `go.opentelemetry.io/otel` — OTel API (attributes, trace)
-- `go.opentelemetry.io/otel/sdk` — OTel SDK (TracerProvider, BatchSpanProcessor, ReadOnlySpan)
-- `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp` — OTLP/HTTP exporter
-- `go.opentelemetry.io/otel/semconv/v1.36.0` — semantic conventions (service.name, deployment.environment)
+- `go.opentelemetry.io/otel`: OTel API (attributes, trace)
+- `go.opentelemetry.io/otel/sdk`: OTel SDK (TracerProvider, BatchSpanProcessor, ReadOnlySpan)
+- `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp`: OTLP/HTTP exporter
+- `go.opentelemetry.io/otel/semconv/v1.36.0`: semantic conventions (service.name, deployment.environment)
 
 All of these were already indirect dependencies via ADK; the plugin promotes them to direct.

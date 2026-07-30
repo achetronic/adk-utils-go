@@ -7,45 +7,33 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// caching.go implements Anthropic prompt caching.
+// caching.go stamps Anthropic prompt-cache markers on a request.
 //
-// Anthropic's cache is OPT-IN and prefix-based: a `cache_control:
-// {"type":"ephemeral"}` marker on a content block tells the API
-// "everything from the start of the request up to and including this
-// block may be cached". A follow-up request whose prefix matches
-// byte-for-byte reads those tokens from cache at ~10% of the normal
-// input price (writing the cache the first time costs ~25% extra,
-// amortised from the second request on). Without markers nothing is
-// cached and every request bills its full input. Prefixes shorter
-// than the model's minimum cacheable length (1024-4096 tokens) are
-// silently not cached — the marker is legal but inert, so it is
-// always safe to set.
+// The cache is opt-in and prefix-based: a cache_control marker on a block
+// makes the API cache everything up to and including that block, and a later
+// request with a byte-identical prefix reads it back at ~10% of the input
+// price. Setting a marker is always safe: prefixes shorter than the model's
+// minimum cacheable length (1024-4096 tokens) are silently not cached.
 //
-// Anthropic caches in the order tools → system → messages and allows
-// at most 4 breakpoints per request. We spend 3, one per section:
+// Anthropic caches in the order tools -> system -> messages and allows at
+// most 4 breakpoints per request. We set 3:
 //
-//  1. The last tool definition. Tool schemas are construction-time
-//     constants for an agent, so this prefix is stable across every
-//     request of a session (and across sessions of the same agent).
+//  1. The last tool definition. Tool schemas are static per agent, so this
+//     prefix survives every request of a session.
 //
-//  2. The last system block. The system prompt is equally static.
-//     Separate from (1) so editing the prompt — e.g. a hot reload —
-//     invalidates only the system+messages cache, not the tools'.
+//  2. The last system block. Static too, and separate from (1) so editing
+//     the prompt (e.g. a hot reload) does not invalidate the tools cache.
 //
-//  3. The last cacheable block of the last message. This is the
-//     incremental marker: turn N's full conversation becomes turn
-//     N+1's cached prefix, which is where the bulk of the savings
-//     come from in agentic loops (each tool round-trip re-sends the
-//     whole history).
+//  3. The last cacheable block of the last message. Turn N's history becomes
+//     turn N+1's cached prefix; this is where the savings come from in
+//     agentic loops, which re-send the whole history on every tool
+//     round-trip. Thinking and redacted-thinking blocks cannot carry a
+//     marker, so this one walks backwards past them to the nearest eligible
+//     block.
 //
-// Thinking and redacted-thinking blocks cannot carry cache_control
-// (the SDK union exposes no slot for it), so marker (3) walks
-// backwards past them to the nearest eligible block.
-
-// applyCacheControl stamps the three breakpoints described above onto
-// params, in place. Call it as the LAST step of buildMessageParams so
-// every section is final (e.g. after repairMessageHistory, which can
-// reorder/merge message blocks).
+// applyCacheControl stamps the three breakpoints onto params, in place. Call
+// it as the LAST step of buildMessageParams so every section is final (e.g.
+// after repairMessageHistory, which can reorder/merge message blocks).
 func applyCacheControl(params *anthropic.MessageNewParams) {
 	marker := anthropic.NewCacheControlEphemeralParam()
 

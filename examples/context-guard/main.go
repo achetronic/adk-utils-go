@@ -5,11 +5,11 @@
 //
 // This example shows the three ways to configure the ContextGuard plugin:
 //
-//  1. CrushRegistry — automatic context window detection from Crush's
-//     provider.json (refreshes every 6h, zero config).
-//  2. WithMaxTokens — manual context window override, useful when using
+//  1. CrushRegistry - automatic context window detection from catwalk's
+//     embedded model database (compiled into the binary, zero config).
+//  2. WithMaxTokens - manual context window override, useful when using
 //     beta features like Anthropic's 1M context window.
-//  3. WithSlidingWindow — turn-count-based compaction instead of
+//  3. WithSlidingWindow - turn-count-based compaction instead of
 //     token-threshold-based.
 //
 // The example uses the CrushRegistry with the threshold strategy by
@@ -51,7 +51,7 @@ func main() {
 
 	modelName := getEnvOrDefault("MODEL_NAME", "claude-sonnet-4-5-20250929")
 
-	// 1. Create the model registry — uses catwalk's embedded database,
+	// 1. Create the model registry - uses catwalk's embedded database,
 	//    no network calls needed.
 	registry := contextguard.NewCrushRegistry()
 
@@ -74,7 +74,7 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	// 4. Configure ContextGuard — pick strategy based on env vars
+	// 4. Configure ContextGuard - pick strategy based on env vars
 	guard := contextguard.New(registry)
 
 	strategy := getEnvOrDefault("STRATEGY", "threshold")
