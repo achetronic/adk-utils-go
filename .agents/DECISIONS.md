@@ -361,3 +361,184 @@ fabricates input. It is the caller's responsibility not to end on an assistant
 turn unless the target model supports prefill. Note `repairMessageHistory` can
 leave a history ending in assistant (after dropping a trailing orphan tool_use);
 that is the most likely way to hit this. Observed on `claude-sonnet-4-6`.
+
+---
+
+## Bedrock adapter (`genai/bedrock`)
+
+Targets Amazon Bedrock's **Converse API**, not the raw `InvokeModel` API and
+not a provider-specific transport (e.g. wrapping `anthropic-sdk-go`'s
+`bedrock` package). This is the central design decision and it shapes
+everything else below.
+
+### B1 - Converse, not InvokeModel: this is what "any model offered by AWS" requires
+
+`InvokeModel`/`InvokeModelWithResponseStream` speak each model family's own
+wire format (Anthropic's Messages shape, Llama's prompt-template shape,
+Titan's shape, ...); building a generic adapter on top of it would mean
+reimplementing a request/response converter per model family, which is a
+different and much larger library. Converse is AWS's unified inference API:
+one typed request/response shape (`types.Message`/`types.ContentBlock`)
+that every Converse-supporting Bedrock model accepts, including
+cross-provider tool use. One adapter, any Bedrock model.
+
+This also has a real, non-cosmetic guardrail benefit (see B2): Converse's
+`GuardrailConfig` is a normal typed field, where `InvokeModel`'s guardrail
+support requires synchronized header+body changes and, for input tagging,
+wrapping prompt spans in literal `<amazon-bedrock-guardrails-guardContent_*>`
+markers. Converse avoids that whole class of footgun.
+
+### B2 - GuardrailConfig is the Converse shape; it is not interchangeable with InvokeModel's header+body pair
+
+Confirmed against the Bedrock User Guide ("Test your guardrail",
+"InvokeModel"/"InvokeModelWithResponseStream" API references): on the
+`InvokeModel` path, attaching a guardrail requires **both**
+`X-Amzn-Bedrock-GuardrailIdentifier`/`-GuardrailVersion` HTTP headers **and**
+a top-level `"amazon-bedrock-guardrailConfig"` body field - sending one
+without the other is a hard error ("Guardrail was enabled but input is in
+incorrect format"). Converse instead takes a typed `GuardrailConfiguration`
+request field (`Converse`) / `GuardrailStreamConfiguration` (`ConverseStream`,
+which additionally needs `StreamProcessingMode`; this adapter always requests
+`sync`). `GuardrailConfig.toConverseConfig()` /
+`.toConverseStreamConfig()` exist as two methods, not one, because the two
+Bedrock types are genuinely distinct - not a naming inconsistency.
+
+### B3 - Guardrail trace/intervention surfaces via `LLMResponse.CustomMetadata["bedrockGuardrail"]`
+
+`model.LLMResponse` has no dedicated guardrail field. Silently dropping
+`StopReason == "guardrail_intervened"` or the trace would hide the one
+thing a guardrail-enabled caller most needs: whether the guardrail touched
+this turn. `guardrailMetadata` stamps
+`CustomMetadata["bedrockGuardrail"] = {"intervened": bool, "trace": ...}`
+(trace only present when `GuardrailConfig.Trace` requested one); the package
+exports `Intervened(customMetadata map[string]any) bool` so callers don't
+need to know the key shape. Non-streaming and streaming responses use
+distinct Bedrock types for the same data (`types.ConverseTrace` vs.
+`types.ConverseStreamTrace`, both wrapping a `*types.GuardrailTraceAssessment`)
+- `guardrailMetadata` takes the inner `GuardrailTraceAssessment` directly so
+both call sites share one implementation instead of two near-duplicates.
+
+### B4 - Role mapping, tool ID sanitization, history repair, and trailing-whitespace trim mirror the Anthropic adapter (A1, A2, A7, A9)
+
+Converse's common content-block set inherits the same practical constraints
+the Anthropic adapter already works around, because the most common Converse
+backend (Claude on Bedrock) has the same underlying API contract:
+
+- **Role**: only `user`/`assistant` exist as message roles (system is a
+  separate top-level field); unknown roles fall back to `user` (mirrors A7).
+- **Tool IDs**: `sanitizeToolID` enforces Bedrock's `toolUseId` charset
+  (`[a-zA-Z0-9_-]`, 1-64 chars) the same way `genai/anthropic`'s
+  `sanitizeToolID` enforces Anthropic's (mirrors A1); a stable hash-derived
+  ID keeps a toolUse/toolResult pair matching after sanitization.
+- **History repair**: `repairMessageHistory` drops orphaned `toolUse` blocks
+  with no matching `toolResult` in the immediately-following user turn
+  (mirrors A2) - ADK histories can end mid-tool-call (cancel, compaction,
+  agent switch), and Bedrock rejects an unanswered toolUse the same way
+  Anthropic does.
+- **Trailing whitespace**: `trimFinalAssistantWhitespace` right-trims the
+  last text block of a trailing assistant turn, dropping it if left empty
+  (mirrors A9).
+
+Tool schema's top-level `type` is likewise forced to `"object"` (mirrors A6),
+and nil/empty tool-call args or tool-result payloads go through
+`common.MarshalToolPayload` so they serialize to `{}`, never `null` (D1/A8).
+
+### B5 - `genai.Schema`'s uppercase type enum is lowercased for the wire
+
+Like `genai/anthropic`'s `lowercaseTypes`, `lowercaseSchemaTypes` recurses a
+decoded JSON-schema map lowercasing every `"type"` value. `genai.Schema.Type`
+marshals using Gemini's uppercase convention (`"OBJECT"`, `"STRING"`); plain
+JSON Schema - what Converse's `ToolInputSchema` expects - uses lowercase.
+`FunctionDeclaration.ParametersJsonSchema` is preferred over the typed
+`Parameters` field when both are set, matching `genai/anthropic`'s
+`convertTools` precedence.
+
+### B6 - Credentials and region use the standard AWS SDK default chain
+
+`Config` does not have an `APIKey` field (there is no Bedrock API key - it's
+SigV4-signed IAM auth). `New` resolves credentials via
+`config.LoadDefaultConfig` (env vars, shared config/credentials files, IAM
+role, SSO, container/EC2 instance credentials, ...) unless the caller
+supplies a fully-built `aws.Config` via `Config.AWSConfig`, which takes
+precedence over `Region`/`Profile` and is the escape hatch for assumed
+roles, custom retryers, or a non-default HTTP client.
+
+### B7 - Reasoning/thinking content is read-only on the way in, dropped on the way out
+
+A `reasoningContent` block in a Converse response (Claude/Nova extended
+thinking via Bedrock) is surfaced as a thought `Part` (`Thought=true`) so
+consumers that want to display or log it can. On the way out,
+`convertPart` drops thought parts unconditionally (regardless of role) -
+unlike `genai/anthropic`'s A3, which echoes thinking blocks back in
+assistant turns. Converse's common `ContentBlock` set has no input variant
+for reasoning content (only `reasoningContent` as an *output* block kind);
+there is nothing to echo it back as, and the model is expected to
+regenerate reasoning each turn rather than replay a prior trace.
+
+### B8 - Guardrail-blocked turns keep Bedrock's own message, tagged with an invisible marker; the triggering user turn is redacted
+
+When a Bedrock Guardrail blocks a turn (`StopReason ==
+"guardrail_intervened"`), `convertOutput` / `generateStream`'s final response
+is passed through `markGuardrailBlocked` (`tools.go`) before being returned.
+Two problems are solved together here:
+
+1. **`Content` must stay non-nil, non-empty, and the turn non-partial.** An
+   earlier version of this fix set `Content = nil` on a guardrail block,
+   relying on ADK's `base_flow.go` behavior of skipping event storage when
+   `Content == nil && ErrorCode == ""`. This broke streaming: Bedrock often
+   streams several partial text chunks *before* it catches and blocks a
+   response, so those partial chunks were already yielded to ADK. Nil-ing the
+   *closing* event caused ADK to skip yielding it too, leaving the last
+   yielded event of the turn Partial=true with no final event to close it -
+   which trips ADK's `base_flow.go` internal invariant
+   ("TODO: last event is not final", `Flow.Run`). A later version replaced
+   the message text outright with a fixed placeholder string, which also
+   fixed this but discarded whatever guardrail message Bedrock actually
+   returned. `markGuardrailBlocked` keeps Bedrock's real text (or, only when
+   Bedrock returned no content at all, falls back to
+   `guardrailFallbackText`) and always yields a real, non-partial, non-empty
+   final event.
+
+2. **Only one message is kept when Bedrock returns more than one text
+   block.** In practice a guardrail-blocked Converse response has sometimes
+   carried the same denial text across two content blocks. Rather than
+   guessing which one to keep, `guardrailBlockedStage` classifies the block
+   using `trace.ModelOutput`: empty means the guardrail denied the prompt
+   *before* the model ran (an "input"-stage block, with no generated text to
+   accompany it), non-empty means the model generated a response and the
+   guardrail denied *that* (an "output"-stage block, where any leaked
+   partial generation is expected to precede the final denial message).
+   `markGuardrailBlocked` uses this to pick the first part for an input
+   block or the last part for an output block; with no trace available
+   (caller didn't request one) it falls back to the first non-empty part.
+
+3. **The user turn that triggered the guardrail must be redacted from
+   history.** ADK stores the user's message before the model is ever called,
+   so it's already in history by the time the response comes back - nothing
+   about the *response* touches it. Left as-is, the next request replays
+   that same triggering text and Bedrock's guardrail fires on it again,
+   blocking every subsequent turn for the rest of the conversation (observed:
+   a single off-topic message locked up the whole session).
+   `redactBlockedInputs` runs as the first history-repair step in
+   `buildConverseInput` (before `repairMessageHistory` and
+   `trimFinalAssistantWhitespace`); it looks for an assistant turn whose
+   first text block starts with `guardrailMarker` and replaces the
+   *preceding* user turn's content with `"[User input redacted by
+   guardrail.]"`.
+
+`guardrailMarker` is a zero-width space (`"​"`) prepended to the first
+text part of a blocked response by `markGuardrailBlocked`. It's invisible
+when rendered but survives being stored and replayed as history, so
+`redactBlockedInputs` can recognize a blocked turn on a later request without
+hardcoding any particular guardrail's refusal wording - that wording is
+guardrail-config-specific and varies per Bedrock Guardrail, so it can't be
+matched literally.
+
+Together these keep the alternating user/assistant turn structure intact
+(no empty or dropped turns, which Bedrock and ADK both reject or mishandle)
+while ensuring the guardrail only fires once per offending input, and without
+editorializing over Bedrock's own guardrail message. This mirrors the
+approach used by the Strands framework (`guardrail_redact_input` /
+`guardrail_redact_output`).
+
+
