@@ -14,7 +14,7 @@ import (
 // applyGenerationConfig must translate genai.ToolConfig.FunctionCallingConfig
 // into OpenAI's tool_choice field. Without this, models that drift into
 // plain-text replies under tool_choice="auto" (the OpenAI default) cannot be
-// forced into tool-calling mode via the ADK config — the setting is silently
+// forced into tool-calling mode via the ADK config - the setting is silently
 // dropped before it reaches the wire.
 func TestApplyGenerationConfig_ToolChoice(t *testing.T) {
 	cases := []struct {

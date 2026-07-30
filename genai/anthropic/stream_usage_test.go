@@ -57,8 +57,8 @@ func sse(event, data string) string {
 
 // Gateways such as new-api (relaying an OpenAI-protocol upstream) send a
 // message_start whose usage is a pre-generation ESTIMATE with no cache
-// fields, and report the authoritative totals — including the prompt-caching
-// split — only in the final message_delta. The final response must carry the
+// fields, and report the authoritative totals - including the prompt-caching
+// split - only in the final message_delta. The final response must carry the
 // delta's numbers, not the estimate. Event sequence captured from a live
 // new-api endpoint.
 func TestStreamUsage_FinalDeltaAuthoritative(t *testing.T) {

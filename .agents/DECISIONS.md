@@ -134,7 +134,7 @@ equivalent, working outputs.
 - **What is allowed to differ:** constructor/config surface, caching, billing/
   auth transport, provider-only features (reasoning blocks). These are opt-in at
   construction time and don't change the `model.LLM` runtime contract.
-- **Why:** consumers (baifo, Magec, …) pick a provider by config and expect the
+- **Why:** consumers (baifo, Magec, ...) pick a provider by config and expect the
   agent to "just work". A divergence where "this provider does X and the other
   does Y and that's why it breaks" is a bug in *this* library, not the
   consumer's problem. Every cross-provider decision above (D1-D4) exists to hold
@@ -230,13 +230,13 @@ OpenAI's Chat Completions API only emits a final usage chunk on the SSE stream
 when the caller opts in via `stream_options.include_usage`. Without it, the
 `ChatCompletionAccumulator`'s `Usage` stays zero, and `buildStreamFinalResponse`
 already reads that accumulator (`convertUsageMetadata(acc.Usage)`) into the
-terminal `LLMResponse`'s `UsageMetadata` — so the plumbing was there, but the
+terminal `LLMResponse`'s `UsageMetadata`: so the plumbing was there, but the
 opt-in was missing.
 
 - **Decision:** `generateStream` sets `params.StreamOptions.IncludeUsage =
   param.NewOpt(true)` before `NewStreaming`. The final `LLMResponse` on the
   streaming path now carries populated `UsageMetadata`, matching the non-
-  streaming path (`generate` → `convertResponse`).
+  streaming path (`generate` -> `convertResponse`).
 - **Why:** consumers that price token spend (Langfuse, billing dashboards)
   need usage on **every** turn, not just the non-streaming ones. Forcing
   callers to pick between streaming UX and usage accounting turned the
@@ -250,7 +250,7 @@ opt-in was missing.
   usage block. No behaviour change for those.
 - **Interrupted streams:** OpenAI's docs note that a broken stream may drop
   the terminal usage chunk. That surfaces as an accumulator with zero usage
-  and O6 drops it — consistent with the pre-change behaviour on those failed
+  and O6 drops it: consistent with the pre-change behaviour on those failed
   turns.
 - **Tests:** `wire_test.go::TestWireBody_StreamRequestsUsage` fires one
   streaming request through the wire-capture fixture and asserts the JSON

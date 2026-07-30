@@ -16,7 +16,7 @@ import (
 // OpenAI messages: function responses must become tool messages of their own,
 // while text/media/tool calls coalesce into a single role message. This test
 // pins down the resulting message shape (count, roles, payload) without
-// reaching into the SDK's union internals — we use a small kind() helper that
+// reaching into the SDK's union internals - we use a small kind() helper that
 // reads which OfXxx pointer is set.
 func TestConvertContentToMessages(t *testing.T) {
 	cases := []struct {

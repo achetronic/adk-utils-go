@@ -408,18 +408,18 @@ func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewP
 			params.Tools = tools
 		}
 
-		// ToolConfig → tool_choice
+		// ToolConfig -> tool_choice
 		//
 		// Maps genai.FunctionCallingConfig.Mode to Anthropic's tool_choice:
-		//   ModeAuto → {type: "auto"} (default behaviour; model may or may not call a tool)
-		//   ModeAny  → {type: "any"}  (model MUST call a tool; use for agentic loops
+		//   ModeAuto -> {type: "auto"} (default behaviour; model may or may not call a tool)
+		//   ModeAny  -> {type: "any"}  (model MUST call a tool; use for agentic loops
 		//                              that can't handle a plain-text reply)
-		//   ModeNone → {type: "none"} (tools disabled for this call even if provided)
+		//   ModeNone -> {type: "none"} (tools disabled for this call even if provided)
 		//
 		// When AllowedFunctionNames holds exactly one name with ModeAny, Anthropic's
 		// equivalent is {type: "tool", name: "..."}. For multiple names we fall back
 		// to {type: "any"} because Anthropic's tool variant accepts a single name,
-		// not a list — same pragmatic choice as the OpenAI adapter. Callers who need
+		// not a list - same pragmatic choice as the OpenAI adapter. Callers who need
 		// a multi-function allowlist should rely on ModeAny plus prompt-level
 		// instructions to pick within the allowed set.
 		if req.Config.ToolConfig != nil && req.Config.ToolConfig.FunctionCallingConfig != nil {
@@ -474,8 +474,8 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 		// otherwise. Thought parts can legitimately appear under a user
 		// role: the ADK contents processor rewrites events authored by a
 		// DIFFERENT agent as user-role "For context:" content
-		// (ConvertForeignEvent) and passes non-text parts — including
-		// signature-only thought parts — through verbatim. Those foreign
+		// (ConvertForeignEvent) and passes non-text parts - including
+		// signature-only thought parts - through verbatim. Those foreign
 		// reasoning blocks are useless as context (their signatures belong
 		// to another conversation anyway), so drop them instead of letting
 		// the API bounce the request.

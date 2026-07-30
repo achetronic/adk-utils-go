@@ -19,7 +19,7 @@ import (
 //   - anything else is rejected with an error
 //
 // We assert on which OfXxx variant ends up populated, plus the relevant
-// payload field, instead of stringifying the entire union — that keeps the
+// payload field, instead of stringifying the entire union - that keeps the
 // tests stable across SDK refactors that may shuffle field names while
 // preserving the discriminator.
 func TestConvertInlineDataToBlock(t *testing.T) {
@@ -96,7 +96,7 @@ func TestConvertInlineDataToBlock(t *testing.T) {
 					t.Fatalf("expected plain-text source")
 				}
 				// Anthropic's plain-text source carries raw bytes verbatim,
-				// not base64 — that is the whole point of using OfText
+				// not base64 - that is the whole point of using OfText
 				// instead of OfBase64.
 				if txt.Data != string(c.data) {
 					t.Errorf("plain text data = %q, want %q", txt.Data, string(c.data))

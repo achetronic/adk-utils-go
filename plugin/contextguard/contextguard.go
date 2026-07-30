@@ -1,23 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
 // SPDX-License-Identifier: Apache-2.0
 
-// Package contextguard implements an ADK plugin that prevents conversations
-// from exceeding the LLM's context window. Before every model call it
-// delegates to a configurable Strategy that decides whether and how to
-// compact the conversation history.
+// Package contextguard implements an ADK plugin that compacts the
+// conversation history before it exceeds the LLM's context window. Before
+// every model call it delegates to a Strategy that decides whether and how
+// to compact.
 //
-// Two strategies are provided out of the box:
+// Two strategies:
 //
-//   - ThresholdStrategy: estimates token count and summarizes when the
-//     remaining capacity drops below a safety buffer (two-tier: fixed 20k
-//     for large windows, 20% for small ones). This is a reactive guard.
+//   - ThresholdStrategy compacts when the estimated token count crosses a
+//     safety buffer (fixed 20k for large windows, 20% for small ones).
+//     Reactive.
 //
-//   - SlidingWindowStrategy: compacts when the number of Content entries
-//     exceeds a configured maximum, regardless of token count. This is a
-//     preventive, periodic compaction based on turn count.
+//   - SlidingWindowStrategy compacts every N Content entries, regardless of
+//     token count. Periodic.
 //
-// Both strategies use the agent's own LLM for summarization and share the
-// same structured system prompt, state keys, and helper functions.
+// Both summarize with the agent's own LLM and share the same system prompt,
+// state keys, and helpers.
 //
 // Usage:
 //

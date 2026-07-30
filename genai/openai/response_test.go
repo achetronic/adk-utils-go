@@ -253,12 +253,12 @@ func TestConvertThinkingLevel(t *testing.T) {
 // from the raw JSON envelope that openai-go preserves on every typed
 // response struct. The function exists because OpenAI-compatible providers
 // (Kimi K2.6, DeepSeek-R1, Qwen3-Thinking, etc.) extend the Chat Completions
-// schema with this field, and openai-go does NOT type it — it lives only in
+// schema with this field, and openai-go does NOT type it - it lives only in
 // JSON.raw / ExtraFields.
 //
 // The contract is: return the field value verbatim if present and non-empty,
 // "" otherwise. Malformed JSON must yield "" rather than an error because
-// callers cannot meaningfully react to it — at the response-conversion
+// callers cannot meaningfully react to it - at the response-conversion
 // layer, dropping a thought Part is the safe degradation.
 func TestExtractReasoningContent(t *testing.T) {
 	cases := []struct {
@@ -315,7 +315,7 @@ func TestExtractReasoningContent(t *testing.T) {
 // Tests below build the response via json.Unmarshal because openai-go
 // stores the raw JSON envelope in an unexported `JSON.raw` field, populated
 // only by the generated UnmarshalJSON. Constructing the struct literally
-// would leave RawJSON() empty and bypass the field we are testing — a
+// would leave RawJSON() empty and bypass the field we are testing - a
 // false-positive trap that would let a regression slip through.
 func TestConvertResponse_WithReasoningContent(t *testing.T) {
 	t.Run("reasoning_content yields a leading Thought part", func(t *testing.T) {
@@ -403,7 +403,7 @@ func TestConvertResponse_WithReasoningContent(t *testing.T) {
 	t.Run("reasoning_content coexists with a tool call", func(t *testing.T) {
 		// The combined case matters because reasoning models often emit
 		// chain-of-thought *and* a tool call in the same turn. The Part
-		// order must be: thought → text → function call, reflecting the
+		// order must be: thought -> text -> function call, reflecting the
 		// temporal order the model produced them.
 		raw := []byte(`{
             "id": "chatcmpl-z",
@@ -415,7 +415,7 @@ func TestConvertResponse_WithReasoningContent(t *testing.T) {
                 "message": {
                     "role": "assistant",
                     "content": "Looking up weather.",
-                    "reasoning_content": "Need fresh data — call the weather tool.",
+                    "reasoning_content": "Need fresh data - call the weather tool.",
                     "tool_calls": [{
                         "id": "call_1",
                         "type": "function",

@@ -46,7 +46,7 @@ Required sections:
 
 ## Exact Next Steps
 
-Be specific. Don't write "continue with the task" — write exactly what should happen next, with enough detail that someone reading only this summary can pick up without asking questions.
+Be specific. Don't write "continue with the task" - write exactly what should happen next, with enough detail that someone reading only this summary can pick up without asking questions.
 
 Tone: Write as if briefing a colleague taking over mid-conversation. Include everything they would need to continue without asking questions. Write in the same language as the conversation.
 
@@ -723,7 +723,7 @@ func contentHasFunctionCall(c *genai.Content) bool {
 // If contentsAtCompaction is 0 or exceeds the current length, the summary
 // is simply prepended (first compaction or safety fallback).
 func injectSummary(req *model.LLMRequest, summary string, contentsAtCompaction int) {
-	summaryText := fmt.Sprintf("[Previous conversation summary]\n%s\n[End of summary — conversation continues below]", summary)
+	summaryText := fmt.Sprintf("[Previous conversation summary]\n%s\n[End of summary - conversation continues below]", summary)
 
 	if len(req.Contents) > 0 && req.Contents[0] != nil &&
 		req.Contents[0].Role == "user" && len(req.Contents[0].Parts) > 0 {
@@ -755,7 +755,7 @@ func replaceSummary(req *model.LLMRequest, summary string, recentContents []*gen
 	summaryContent := &genai.Content{
 		Role: "user",
 		Parts: []*genai.Part{
-			{Text: fmt.Sprintf("[Previous conversation summary]\n%s\n[End of summary — conversation continues below]", summary)},
+			{Text: fmt.Sprintf("[Previous conversation summary]\n%s\n[End of summary - conversation continues below]", summary)},
 		},
 	}
 	req.Contents = append([]*genai.Content{summaryContent}, recentContents...)

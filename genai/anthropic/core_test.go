@@ -118,7 +118,7 @@ func TestConvertContentToMessage(t *testing.T) {
 // convertResponse rebuilds a genai.LLMResponse from the SDK's Anthropic
 // Message. We feed it a JSON-decoded Message rather than constructing one in
 // memory because the SDK's content blocks use an opaque discriminated union
-// whose fields are populated during unmarshal — building it manually would
+// whose fields are populated during unmarshal - building it manually would
 // require reaching into unexported state and create a brittle dependency on
 // the SDK's internals.
 func TestConvertResponse(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 // Anthropic's ToolChoiceUnionParam is a discriminated union with four
 // mutually-exclusive variants (OfAuto / OfAny / OfTool / OfNone). We assert
 // on the variant pointers directly because the nested Type field uses
-// constant.* types whose in-memory zero value is the empty string — their
+// constant.* types whose in-memory zero value is the empty string - their
 // real discriminator is injected during marshaling, not at construction.
 // Checking the pointer-set pattern matches what GetType() does internally
 // and is what the marshaler keys off of.
@@ -50,7 +50,7 @@ func readVariant(tc anthropic.ToolChoiceUnionParam) toolChoiceVariant {
 // buildMessageParams must translate genai.ToolConfig.FunctionCallingConfig
 // into Anthropic's tool_choice field. Without this, models that drift into
 // plain-text replies (the same production symptom that motivated the OpenAI
-// adapter fix) cannot be forced into tool-calling mode via the ADK config —
+// adapter fix) cannot be forced into tool-calling mode via the ADK config -
 // the setting is silently dropped before it reaches the wire.
 func TestBuildMessageParams_ToolChoice(t *testing.T) {
 	cases := []struct {
@@ -107,7 +107,7 @@ func TestBuildMessageParams_ToolChoice(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Exercise the full path from LLMRequest to SDK params rather than
-			// poking at a private helper — keeps the test stable if the mapping
+			// poking at a private helper - keeps the test stable if the mapping
 			// is ever refactored into its own function.
 			params, err := m.buildMessageParams(&model.LLMRequest{Config: tc.cfg})
 			if err != nil {

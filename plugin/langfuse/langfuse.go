@@ -3,7 +3,7 @@
 
 // Package langfuse wires ADK Go telemetry to a Langfuse instance via OTLP/HTTP.
 //
-// It is fully self-contained — it has zero imports from any host application.
+// It is fully self-contained - it has zero imports from any host application.
 // Any project using the ADK can import this package as a library, call
 // Setup to configure the exporter and get back the plugin config and a
 // shutdown function.
@@ -155,26 +155,21 @@ type llmCall struct {
 // spanEnricher
 // ---------------------------------------------------------------------------
 
-// spanEnricher is the core state holder for the Langfuse ADK plugin. It
-// tracks in-flight agent spans and pending LLM calls so that the
+// spanEnricher tracks in-flight agent spans and pending LLM calls so the
 // enrichingExporter can attach request/response payloads to the correct
-// generate_content spans at export time.
+// generate_content span at export time.
 //
-// Keys are built from invocationID + branch (via branchKey) so that
-// ParallelAgent sub-agents running concurrently under the same invocation
-// never collide. For sequential flows the branch is empty and the key
-// degrades to the invocationID alone.
+// Keys combine invocationID and branch (see branchKey), so ParallelAgent
+// sub-agents under the same invocation never collide. Pending LLM calls are
+// keyed by the invoke_agent span ID the callbacks see; the exporter matches
+// them via the parent span ID of each generate_content span.
 //
-// Pending LLM calls are keyed by the invoke_agent span ID visible to the
-// callbacks. The enrichingExporter matches them by looking up the parent
-// span ID of each generate_content span (which is its invoke_agent ancestor).
-//
-// All callbacks return (nil, nil) — the plugin is a pure observer that never
-// alters agent behaviour or short-circuits the ADK callback chain.
+// All callbacks return (nil, nil): the plugin only observes, it never alters
+// agent behaviour or short-circuits the ADK callback chain.
 type spanEnricher struct {
 	mu         sync.Mutex
-	agentSpans map[string][]oteltrace.Span // branchKey → stack of invoke_agent spans
-	pending    map[string][]llmCall        // invoke_agent spanID → FIFO queue of LLM calls awaiting export
+	agentSpans map[string][]oteltrace.Span // branchKey -> stack of invoke_agent spans
+	pending    map[string][]llmCall        // invoke_agent spanID -> FIFO queue of LLM calls awaiting export
 }
 
 // branchKey builds the map key that isolates parallel branches. In
@@ -260,15 +255,11 @@ func (e *spanEnricher) afterAgent(ctx agent.Context) (*genai.Content, error) {
 	return nil, nil
 }
 
-// beforeModel is the BeforeModelCallback. It serialises the full LLM prompt
-// (system instruction, conversation history, tool calls/responses) and
-// enqueues it as a pending llmCall keyed by the invoke_agent span ID.
-//
-// ADK callbacks see the invoke_agent span in their context (the
-// generate_content span is created later, inside the ADK, and is never
-// visible to plugin callbacks). The enrichingExporter bridges the gap by
-// looking up pending calls via the parent span ID of each generate_content
-// span, which is the invoke_agent span ID stored here.
+// beforeModel serialises the full LLM prompt (system instruction, history,
+// tool calls) and enqueues it as a pending llmCall keyed by the invoke_agent
+// span ID. The generate_content span is created later inside the ADK and is
+// never visible to callbacks; the exporter bridges the gap by matching on
+// the parent span ID, which is the invoke_agent span ID stored here.
 func (e *spanEnricher) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	span := oteltrace.SpanFromContext(ctx)
 	if !span.IsRecording() {
@@ -286,14 +277,11 @@ func (e *spanEnricher) beforeModel(ctx agent.Context, req *model.LLMRequest) (*m
 	return nil, nil
 }
 
-// afterModel is the AfterModelCallback. It captures the model's response
-// text (or the error message on failure), attaches it to the pending
-// llmCall, and — when the response is a non-partial final text answer (no
-// function calls) — propagates the output to the ancestor invoke_agent
-// spans in the same branch so that Langfuse shows the final answer at the
-// trace level. The check avoids resp.TurnComplete because that field is
-// only populated in streaming mode; instead it uses !Partial +
-// !hasFunctionCalls which works in both streaming and non-streaming flows.
+// afterModel attaches the model's response text (or the error) to the
+// pending llmCall. On a final text answer it also propagates the output to
+// the ancestor invoke_agent spans, so Langfuse shows it at trace level.
+// "Final" is detected as !Partial + !hasFunctionCalls, not TurnComplete:
+// TurnComplete is only set in streaming mode, and this must work in both.
 func (e *spanEnricher) afterModel(ctx agent.Context, resp *model.LLMResponse, llmErr error) (*model.LLMResponse, error) {
 	span := oteltrace.SpanFromContext(ctx)
 	if !span.IsRecording() {
@@ -367,7 +355,7 @@ func (e *spanEnricher) popCall(spanID string) (llmCall, bool) {
 // OTel spans.
 //
 // Pending calls are looked up by the parent span ID of each generate_content
-// span — that parent is the invoke_agent span whose ID was used as key by
+// span - that parent is the invoke_agent span whose ID was used as key by
 // the beforeModel/afterModel callbacks.
 type enrichingExporter struct {
 	inner    sdktrace.SpanExporter
@@ -512,7 +500,7 @@ func contentToText(c *genai.Content) string {
 			parts = append(parts, fmt.Sprintf("[tool_call: %s(%s)]", p.FunctionCall.Name, string(args)))
 		case p.FunctionResponse != nil:
 			resp, _ := json.Marshal(p.FunctionResponse.Response)
-			parts = append(parts, fmt.Sprintf("[tool_response: %s → %s]", p.FunctionResponse.Name, string(resp)))
+			parts = append(parts, fmt.Sprintf("[tool_response: %s -> %s]", p.FunctionResponse.Name, string(resp)))
 		}
 	}
 	return strings.Join(parts, "\n")

@@ -142,7 +142,7 @@ func captureStreamBody(t *testing.T, req *model.LLMRequest) map[string]any {
 // On the wire, a streaming request must set stream_options.include_usage=true.
 // Without this opt-in the OpenAI server never emits the terminal usage chunk,
 // the ChatCompletionAccumulator's Usage stays zero, and buildStreamFinalResponse
-// yields empty UsageMetadata — leaving consumers no way to price the turn.
+// yields empty UsageMetadata - leaving consumers no way to price the turn.
 func TestWireBody_StreamRequestsUsage(t *testing.T) {
 	body := captureStreamBody(t, &model.LLMRequest{
 		Config: &genai.GenerateContentConfig{},
