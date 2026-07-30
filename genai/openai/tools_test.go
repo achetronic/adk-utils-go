@@ -251,7 +251,7 @@ func TestConvertInlineDataToPart(t *testing.T) {
 // OpenAI supports. Unlike convertInlineDataToPart it passes the FileURI straight
 // through to image_url instead of base64-encoding bytes. Only images can be
 // referenced by URL (audio and files still require uploaded bytes), and the URI
-// must be http(s) — plain http is allowed because OpenAI-compatible gateways
+// must be http(s): plain http is allowed because OpenAI-compatible gateways
 // (Ollama, vLLM, ...) commonly fetch from local http endpoints.
 func TestConvertFileDataToPart(t *testing.T) {
 	const fileURI = "https://cdn.example.com/cat.png"
@@ -265,6 +265,7 @@ func TestConvertFileDataToPart(t *testing.T) {
 		{name: "image/png becomes a url image part", mime: "image/png", uri: fileURI},
 		{name: "image/jpeg also routes to image", mime: "image/jpeg", uri: fileURI},
 		{name: "image/webp also routes to image", mime: "image/webp", uri: fileURI},
+		{name: "MIME parameters are stripped before matching", mime: "image/png; charset=utf-8", uri: fileURI},
 		{name: "plain http is allowed for gateways", mime: "image/png", uri: "http://localhost:8080/cat.png"},
 		{name: "audio is not supported via URL", mime: "audio/wav", uri: fileURI, wantErr: true},
 		{name: "pdf is not supported via URL", mime: "application/pdf", uri: fileURI, wantErr: true},
@@ -300,6 +301,15 @@ func TestConvertFileDataToPart(t *testing.T) {
 		_, err := convertFileDataToPart(nil)
 		if err == nil {
 			t.Errorf("expected error for nil file data")
+		}
+	})
+
+	// genai.FileData documents FileURI as a Google Cloud Storage URI, so
+	// callers holding a gs:// URI need to be told where to go instead.
+	t.Run("gs URI error points to InlineData", func(t *testing.T) {
+		_, err := convertFileDataToPart(&genai.FileData{MIMEType: "image/png", FileURI: "gs://bucket/cat.png"})
+		if err == nil || !strings.Contains(err.Error(), "InlineData") {
+			t.Errorf("gs:// error should point the caller to InlineData, got: %v", err)
 		}
 	})
 }

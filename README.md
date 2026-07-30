@@ -134,13 +134,13 @@ Both clients support:
 - Streaming and non-streaming responses
 - System instructions
 - Tool/function calling
-- Image inputs: inline bytes (`InlineData`, sent as base64) or remote URLs (`FileData`, passed through to the provider's image-URL field — nothing is downloaded or re-encoded)
+- Image inputs: inline bytes (`InlineData`, sent as base64) or remote URLs (`FileData`, passed through to the provider's image-URL field; nothing is downloaded or re-encoded)
 - Temperature, TopP, MaxOutputTokens, StopSequences
 - Extended thinking: classic budget API (`ThinkingBudgetTokens`) and adaptive effort API (`ThinkingEffort` + `ThinkingMode`)
 - Usage metadata
 - Custom HTTP headers (multi-value)
 
-Remote image URLs (`genai.Part.FileData`) are supported for image MIME types only — audio and documents still require uploaded bytes via `InlineData`. The URI must be `http(s)`: plain `http` is allowed because both clients also serve API-compatible gateways (Ollama, vLLM, LiteLLM, ...) that commonly fetch from local http endpoints, while `anthropic.com` itself only fetches publicly accessible `https` URLs and enforces that server-side. Invalid schemes and non-image MIME types fail with a clear error instead of being silently dropped.
+Remote image URLs (`genai.Part.FileData`) work for image MIME types only; audio and documents still need uploaded bytes via `InlineData`. The URI must be `http(s)`. Plain `http` is allowed because both clients also serve API-compatible gateways (Ollama, vLLM, LiteLLM, ...) that commonly fetch from local http endpoints; which URLs a hosted provider actually fetches is decided on its side. Note that `gs://` URIs are rejected even though `genai.FileData` documents them: neither provider can read from Google Cloud Storage, so for GCS-hosted files fetch the bytes and use `InlineData`. Invalid schemes and non-image MIME types fail with a clear error instead of being silently dropped.
 
 ## Session Service (Redis)
 

@@ -5,6 +5,7 @@ package anthropic
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"google.golang.org/genai"
@@ -115,11 +116,9 @@ func TestConvertInlineDataToBlock(t *testing.T) {
 
 // convertFileDataToBlock builds an OfImage block whose source is a remote URL
 // (OfURL) rather than base64 bytes, passing the FileURI through verbatim. Only
-// image MIME types are supported, and the URI must be http(s) — plain http is
+// image MIME types are supported, and the URI must be http(s): plain http is
 // allowed because Anthropic-compatible gateways behind Config.BaseURL commonly
-// fetch from local http endpoints (anthropic.com itself only fetches https and
-// enforces that server-side). Other schemes fail here with a clear error
-// instead of a provider-side 400.
+// fetch from local http endpoints. Other schemes fail with a clear error.
 func TestConvertFileDataToBlock(t *testing.T) {
 	const fileURI = "https://cdn.example.com/cat.png"
 
@@ -134,6 +133,7 @@ func TestConvertFileDataToBlock(t *testing.T) {
 		{name: "image/jpg alias", mime: "image/jpg", uri: fileURI},
 		{name: "image/gif", mime: "image/gif", uri: fileURI},
 		{name: "image/webp", mime: "image/webp", uri: fileURI},
+		{name: "MIME parameters are stripped before matching", mime: "image/png; charset=utf-8", uri: fileURI},
 		{name: "application/pdf unsupported", mime: "application/pdf", uri: fileURI, wantErr: true},
 		{name: "text/plain unsupported", mime: "text/plain", uri: fileURI, wantErr: true},
 		{name: "video/mp4 unsupported", mime: "video/mp4", uri: fileURI, wantErr: true},
@@ -172,6 +172,15 @@ func TestConvertFileDataToBlock(t *testing.T) {
 		_, err := convertFileDataToBlock(nil)
 		if err == nil {
 			t.Errorf("expected error for nil file data")
+		}
+	})
+
+	// genai.FileData documents FileURI as a Google Cloud Storage URI, so
+	// callers holding a gs:// URI need to be told where to go instead.
+	t.Run("gs URI error points to InlineData", func(t *testing.T) {
+		_, err := convertFileDataToBlock(&genai.FileData{MIMEType: "image/png", FileURI: "gs://bucket/cat.png"})
+		if err == nil || !strings.Contains(err.Error(), "InlineData") {
+			t.Errorf("gs:// error should point the caller to InlineData, got: %v", err)
 		}
 	})
 }
