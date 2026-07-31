@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -431,6 +432,13 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 				return nil, err
 			}
 			mediaParts = append(mediaParts, *p)
+
+		case part.FileData != nil:
+			p, err := convertFileDataToPart(part.FileData)
+			if err != nil {
+				return nil, err
+			}
+			mediaParts = append(mediaParts, *p)
 		}
 	}
 
@@ -727,7 +735,7 @@ func convertInlineDataToPart(data *genai.Blob) (*openai.ChatCompletionContentPar
 		return nil, fmt.Errorf("inline data is nil")
 	}
 
-	mediaType := data.MIMEType
+	mediaType := normalizeMIMEType(data.MIMEType)
 	base64Data := base64.StdEncoding.EncodeToString(data.Data)
 
 	switch {
@@ -769,6 +777,53 @@ func convertInlineDataToPart(data *genai.Blob) (*openai.ChatCompletionContentPar
 	default:
 		return nil, fmt.Errorf("unsupported inline data MIME type for OpenAI: %s", mediaType)
 	}
+}
+
+// convertFileDataToPart maps a FileData part to an image_url content part;
+// the URI goes through verbatim, nothing is downloaded. Images only: audio
+// and files need uploaded bytes (InlineData). Plain http is allowed for
+// OpenAI-compatible gateways (Ollama, vLLM, ...). Other schemes error
+// instead of being silently dropped; gs://, the scheme genai.FileData
+// documents, gets its own message pointing at InlineData. DisplayName is
+// dropped: image_url has no field for it.
+func convertFileDataToPart(data *genai.FileData) (*openai.ChatCompletionContentPartUnionParam, error) {
+	if data == nil {
+		return nil, fmt.Errorf("file data is nil")
+	}
+	if strings.HasPrefix(data.FileURI, "gs://") {
+		return nil, fmt.Errorf("file data URI %q is a Google Cloud Storage URI, which OpenAI cannot fetch: download the bytes and use InlineData instead", data.FileURI)
+	}
+	if !strings.HasPrefix(data.FileURI, "https://") && !strings.HasPrefix(data.FileURI, "http://") {
+		return nil, fmt.Errorf("file data URI must be an http(s) URL for OpenAI, got %q", data.FileURI)
+	}
+
+	mediaType := normalizeMIMEType(data.MIMEType)
+	switch mediaType {
+	case "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp":
+		return &openai.ChatCompletionContentPartUnionParam{
+			OfImageURL: &openai.ChatCompletionContentPartImageParam{
+				ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+					URL:    data.FileURI,
+					Detail: "auto",
+				},
+			},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported file data MIME type for OpenAI: %s", mediaType)
+	}
+}
+
+// normalizeMIMEType strips parameters from a MIME string ("image/png;
+// charset=utf-8" becomes "image/png") so the converters match on the media
+// type alone. Malformed strings come back unchanged and fail the match with
+// the caller's input in the error.
+func normalizeMIMEType(mimeType string) string {
+	mediaType, _, err := mime.ParseMediaType(mimeType)
+	if err != nil {
+		return mimeType
+	}
+	return mediaType
 }
 
 // convertUsageMetadata converts OpenAI usage stats to genai format.

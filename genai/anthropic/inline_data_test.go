@@ -5,6 +5,7 @@ package anthropic
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"google.golang.org/genai"
@@ -109,6 +110,77 @@ func TestConvertInlineDataToBlock(t *testing.T) {
 		_, err := convertInlineDataToBlock(nil)
 		if err == nil {
 			t.Errorf("expected error for nil blob")
+		}
+	})
+}
+
+// convertFileDataToBlock builds an OfImage block whose source is a remote URL
+// (OfURL) rather than base64 bytes, passing the FileURI through verbatim. Only
+// image MIME types are supported, and the URI must be http(s): plain http is
+// allowed because Anthropic-compatible gateways behind Config.BaseURL commonly
+// fetch from local http endpoints. Other schemes fail with a clear error.
+func TestConvertFileDataToBlock(t *testing.T) {
+	const fileURI = "https://cdn.example.com/cat.png"
+
+	cases := []struct {
+		name    string
+		mime    string
+		uri     string
+		wantErr bool
+	}{
+		{name: "image/png", mime: "image/png", uri: fileURI},
+		{name: "image/jpeg", mime: "image/jpeg", uri: fileURI},
+		{name: "image/jpg alias", mime: "image/jpg", uri: fileURI},
+		{name: "image/gif", mime: "image/gif", uri: fileURI},
+		{name: "image/webp", mime: "image/webp", uri: fileURI},
+		{name: "MIME parameters are stripped before matching", mime: "image/png; charset=utf-8", uri: fileURI},
+		{name: "application/pdf unsupported", mime: "application/pdf", uri: fileURI, wantErr: true},
+		{name: "text/plain unsupported", mime: "text/plain", uri: fileURI, wantErr: true},
+		{name: "video/mp4 unsupported", mime: "video/mp4", uri: fileURI, wantErr: true},
+		{name: "empty MIME type rejected", mime: "", uri: fileURI, wantErr: true},
+		{name: "plain http is allowed for gateways", mime: "image/png", uri: "http://localhost:8080/cat.png"},
+		{name: "gs scheme rejected", mime: "image/png", uri: "gs://bucket/cat.png", wantErr: true},
+		{name: "empty URI rejected", mime: "image/png", uri: "", wantErr: true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := convertFileDataToBlock(&genai.FileData{MIMEType: c.mime, FileURI: c.uri})
+			if c.wantErr {
+				if err == nil {
+					t.Errorf("expected error for MIME %q URI %q, got %#v", c.mime, c.uri, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got == nil || got.OfImage == nil {
+				t.Fatalf("expected OfImage variant, got %#v", got)
+			}
+			src := got.OfImage.Source.OfURL
+			if src == nil {
+				t.Fatalf("expected a URL image source, got %#v", got.OfImage.Source)
+			}
+			if src.URL != c.uri {
+				t.Errorf("URL = %q, want %q (must be passed through verbatim)", src.URL, c.uri)
+			}
+		})
+	}
+
+	t.Run("nil file data returns an error", func(t *testing.T) {
+		_, err := convertFileDataToBlock(nil)
+		if err == nil {
+			t.Errorf("expected error for nil file data")
+		}
+	})
+
+	// genai.FileData documents FileURI as a Google Cloud Storage URI, so
+	// callers holding a gs:// URI need to be told where to go instead.
+	t.Run("gs URI error points to InlineData", func(t *testing.T) {
+		_, err := convertFileDataToBlock(&genai.FileData{MIMEType: "image/png", FileURI: "gs://bucket/cat.png"})
+		if err == nil || !strings.Contains(err.Error(), "InlineData") {
+			t.Errorf("gs:// error should point the caller to InlineData, got: %v", err)
 		}
 	})
 }
