@@ -3,6 +3,10 @@
 
 package langfuse
 
+import (
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+)
+
 // Config holds the credentials and optional metadata needed to export traces
 // to a Langfuse instance via OTLP/HTTP.
 //
@@ -41,6 +45,28 @@ type Config struct {
 	// (e.g. plain-HTTP local development). The default (false) keeps TLS
 	// enabled, which is required for the public Langfuse Cloud endpoints.
 	Insecure bool `yaml:"insecure,omitempty" json:"insecure,omitempty"`
+
+	// TracerProviderOptions are extra options for the trace provider Setup
+	// builds, on top of the exporter and resource it wires itself. Use it
+	// for settings the default wiring does not expose: a custom ID generator
+	// (for example one that derives the trace ID from your own run ID, so a
+	// paused agent resuming in another HTTP request stays in one Langfuse
+	// trace), a sampler to cap ingestion volume, or span limits.
+	//
+	// The options run after Setup's own resource and span processor, so an
+	// option with replace semantics (sdktrace.WithResource, for example)
+	// overrides what Setup wired. The resource Setup wires is merged over
+	// resource.Default(), matching what the ADK assembles on its default
+	// path.
+	//
+	// Caveat: with this field set the ADK receives a finished trace provider
+	// and skips the extra OTLP trace exporters it would otherwise wire from
+	// the OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+	// environment variables. Log exporters are unaffected.
+	//
+	// Programmatic only: the field cannot be set from YAML/JSON config
+	// files. When empty, Setup behaves exactly as before.
+	TracerProviderOptions []sdktrace.TracerProviderOption `yaml:"-" json:"-"`
 }
 
 // IsEnabled reports whether the minimum required credentials (PublicKey and
