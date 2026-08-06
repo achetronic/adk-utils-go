@@ -412,3 +412,35 @@ Because this is a provider wire-schema rule, it lives in the adapters (consumers
 - `genai/openai` and `genai/anthropic` both route `FunctionCall.Args` and `FunctionResponse.Response` through `common.MarshalToolPayload` (in the `genai/common` package), which performs the `null`/empty -> `{}` normalisation once for both providers, propagates a genuine marshal error, and never mutates the input. Keeping it in one place is what guarantees tool_use and tool_result stay symmetric and the two adapters stay interchangeable (D5).
 
 Coverage: `genai/common/payload_test.go` pins the helper's unit contract; each adapter's `tool_payload_test.go` pins the integration, including a canary that fails if a future change "fixes" the nil payload by mutating the shared input in place. Full rationale and the per-provider decision list are in [DECISIONS.md](./DECISIONS.md) (decision D1).
+
+## LLM Adapters: reasoning round-trips as its own field, never inside `content`
+
+The OpenAI adapter reads a provider's reasoning on ingest into a `Thought: true` part, and sends thought parts back out as reasoning instead of folding them into `content`. These `Config` fields control the wire shape:
+
+| Field                          | Default             | Effect                                                                              |
+| ------------------------------ | ------------------- | ----------------------------------------------------------------------------------- |
+| `ReasoningEgress` (unset)      | `native`            | Reasoning becomes its own field on the assistant message, next to `content`          |
+| `ReasoningEgress: think_tags`  | -                   | Reasoning is prepended to `content` inside a `<think>` block, no extra field is sent |
+| `ReasoningEgress: omit`        | -                   | No reasoning is sent in any shape                                                    |
+| `ReasoningField`               | `reasoning_content` | Names the plain-text field, on ingest and on egress alike                            |
+| `SupportsReasoningDetails`     | off                 | Allows OpenRouter's `reasoning_details` array to be sent back                         |
+
+Native is the default because DeepSeek in thinking mode and Kimi K2 thinking reject a history whose assistant messages lack the key. Think tags exist for backends that validate messages against a schema forbidding unknown fields and answer the key with a 400; omit is for backends that discard reasoning history anyway, and is never a default. Reasoning is dropped under any role other than assistant, matching the Anthropic adapter, and a turn carrying nothing but reasoning sends no message in native mode because an assistant message needs `content` or `tool_calls`.
+
+OpenRouter is the awkward one. It returns its plain-text reasoning under `reasoning` (never `reasoning_content`, which it only accepts as an input alias), so `ReasoningField` has to be set to `reasoning` there or ingest reads nothing. Its structured `reasoning_details` blocks are always captured into `Part.PartMetadata` under the exported `ReasoningDetailMetadataKey`, one Part per block in wire order, and are only replayed when `SupportsReasoningDetails` is set. Blocks travel verbatim, since OpenRouter requires the replayed sequence to match what the model produced; an encrypted block has no readable text and is therefore the one thing lost when the array cannot be sent.
+
+Streamed reasoning is accumulated by the adapter, not read off the SDK's stream accumulator, which keeps no raw JSON on the message it aggregates. Do not "simplify" that back: a test that fabricates an accumulator from a whole response will pass while the live path is broken.
+
+Coverage: `genai/openai/reasoning_test.go` for the conversion contract, `genai/openai/reasoning_details_test.go` for the blocks (including a byte-identical round trip), `genai/openai/reasoning_stream_test.go` for real streaming chunks, and `genai/openai/wire_test.go` for the bytes of each mode. Full rationale is in [DECISIONS.md](./DECISIONS.md) (decisions O10, O11 and O12).
+
+## LLM Adapters: provider extensions at the request root
+
+The OpenAI adapter's `Config.ExtraBody map[string]any` is merged into the root of every request body, on both the streaming and non-streaming paths. It is how a caller reaches fields Chat Completions does not define, such as OpenRouter's `reasoning`, `provider`, `transforms` and `plugins`:
+
+```go
+ExtraBody: map[string]any{
+    "reasoning": map[string]any{"effort": "high"},
+}
+```
+
+The map is copied in the constructor, so a caller mutating its own copy later cannot race with a request in flight. A key that collides with a field the adapter sets replaces it on the wire, which is deliberate: this is an extension point, not a guarded one. Coverage is in `genai/openai/extra_body_test.go`; rationale in [DECISIONS.md](./DECISIONS.md) (decision O13).

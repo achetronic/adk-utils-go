@@ -21,6 +21,15 @@ import (
 // the bytes a real OpenAI-compatible server receives are correct.
 func captureBody(t *testing.T, req *model.LLMRequest) map[string]any {
 	t.Helper()
+	return captureBodyWithConfig(t, Config{}, req)
+}
+
+// captureBodyWithConfig is captureBody for a caller-provided Config, so
+// options that only show up on the wire (the reasoning egress shape, for
+// instance) can be asserted per mode. BaseURL, APIKey and ModelName are
+// filled in for the fixture.
+func captureBodyWithConfig(t *testing.T, cfg Config, req *model.LLMRequest) map[string]any {
+	t.Helper()
 
 	var captured []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -31,7 +40,10 @@ func captureBody(t *testing.T, req *model.LLMRequest) map[string]any {
 	}))
 	defer srv.Close()
 
-	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "gpt-test"})
+	cfg.BaseURL = srv.URL
+	cfg.APIKey = "test-key"
+	cfg.ModelName = "gpt-test"
+	m := New(cfg)
 
 	for _, err := range m.GenerateContent(context.Background(), req, false) {
 		if err != nil {
@@ -101,11 +113,160 @@ func TestWireBody_NilFunctionResponse(t *testing.T) {
 	}
 }
 
+// On the wire, a replayed thought part must reach the server as its own
+// reasoning_content key next to content, not folded into content. DeepSeek in
+// thinking mode and Kimi K2 thinking check for the literal key and reject the
+// request without it.
+func TestWireBody_ReasoningContentOnAssistantMessage(t *testing.T) {
+	body := captureBody(t, &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{},
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "What's the weather?"}}},
+			{Role: "model", Parts: []*genai.Part{
+				{Text: "The user wants weather info, I should check my tools...", Thought: true},
+				{Text: "It's sunny today."},
+			}},
+			{Role: "user", Parts: []*genai.Part{{Text: "Thanks, and tomorrow?"}}},
+		},
+	})
+
+	assistant := messageOfRole(t, body, "assistant")
+	if assistant["content"] != "It's sunny today." {
+		t.Errorf("content = %q, want the reply only", assistant["content"])
+	}
+	if assistant["reasoning_content"] != "The user wants weather info, I should check my tools..." {
+		t.Errorf("reasoning_content = %q, want the reasoning", assistant["reasoning_content"])
+	}
+}
+
+// The tool-loop case: reasoning_content must sit next to tool_calls on the
+// assistant message, which is what the strict thinking providers require on
+// every intermediate step.
+func TestWireBody_ReasoningContentWithToolCall(t *testing.T) {
+	body := captureBody(t, &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{},
+		Contents: []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{
+				{Text: "I need the status tool first.", Thought: true},
+				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "check_status"}},
+			}},
+		},
+	})
+
+	assistant := messageOfRole(t, body, "assistant")
+	if calls, _ := assistant["tool_calls"].([]any); len(calls) != 1 {
+		t.Fatalf("expected 1 tool_call, got %v", assistant["tool_calls"])
+	}
+	if assistant["reasoning_content"] != "I need the status tool first." {
+		t.Errorf("reasoning_content = %q, want the reasoning", assistant["reasoning_content"])
+	}
+}
+
+// Think-tag mode must put the reasoning inside content and send no extra key,
+// so backends that validate messages against a schema forbidding extra fields
+// accept the request.
+func TestWireBody_ReasoningAsThinkTags(t *testing.T) {
+	body := captureBodyWithConfig(t, Config{ReasoningEgress: ReasoningEgressThinkTags}, &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{},
+		Contents: []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{
+				{Text: "thinking", Thought: true},
+				{Text: "reply"},
+			}},
+		},
+	})
+
+	assistant := messageOfRole(t, body, "assistant")
+	if assistant["content"] != "<think>\nthinking\n</think>\nreply" {
+		t.Errorf("content = %q, want the reasoning in a think block ahead of the reply", assistant["content"])
+	}
+	if _, ok := assistant["reasoning_content"]; ok {
+		t.Errorf("reasoning_content must be absent in think-tag mode: %v", assistant)
+	}
+}
+
+// A configured field name is what lands on the wire, for gateways that only
+// accept "reasoning".
+func TestWireBody_ReasoningCustomFieldName(t *testing.T) {
+	body := captureBodyWithConfig(t, Config{ReasoningField: "reasoning"}, &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{},
+		Contents: []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{
+				{Text: "thinking", Thought: true},
+				{Text: "reply"},
+			}},
+		},
+	})
+
+	assistant := messageOfRole(t, body, "assistant")
+	if assistant["reasoning"] != "thinking" {
+		t.Errorf("reasoning = %q, want the reasoning", assistant["reasoning"])
+	}
+	if _, ok := assistant["reasoning_content"]; ok {
+		t.Errorf("reasoning_content must be absent when another field name is configured: %v", assistant)
+	}
+}
+
+// On the wire, OpenRouter's reasoning_details array must sit on the assistant
+// message next to tool_calls, with each block intact. That combination is the
+// case OpenRouter calls out as the reason to preserve blocks: a model pausing
+// mid-reasoning to call a tool resumes from these blocks once the result
+// comes back.
+func TestWireBody_ReasoningDetailsWithToolCall(t *testing.T) {
+	body := captureBodyWithConfig(t, Config{
+		ReasoningField:           "reasoning",
+		SupportsReasoningDetails: true,
+	}, &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{},
+		Contents: []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{
+				{
+					Text:    "I need the status tool first.",
+					Thought: true,
+					PartMetadata: map[string]any{ReasoningDetailMetadataKey: map[string]any{
+						"type":      "reasoning.text",
+						"text":      "I need the status tool first.",
+						"signature": "sig-1",
+						"index":     float64(0),
+					}},
+				},
+				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "check_status"}},
+			}},
+		},
+	})
+
+	assistant := messageOfRole(t, body, "assistant")
+	if calls, _ := assistant["tool_calls"].([]any); len(calls) != 1 {
+		t.Fatalf("expected 1 tool_call, got %v", assistant["tool_calls"])
+	}
+	details, ok := assistant["reasoning_details"].([]any)
+	if !ok || len(details) != 1 {
+		t.Fatalf("reasoning_details = %v, want 1 block beside tool_calls", assistant["reasoning_details"])
+	}
+	block, _ := details[0].(map[string]any)
+	if block["type"] != "reasoning.text" || block["signature"] != "sig-1" {
+		t.Errorf("block = %#v, want the signature preserved", block)
+	}
+	// The block already carries the reasoning; repeating it in the plain-text
+	// field would send the same thing twice.
+	if _, ok := assistant["reasoning"]; ok {
+		t.Errorf("plain-text reasoning must not duplicate the block: %v", assistant)
+	}
+}
+
 // captureStreamBody is the streaming twin of captureBody: it points the model at
 // a fake SSE endpoint, fires one streaming request, and returns the JSON body
 // that hit the wire. Serves a minimal valid SSE stream so the accumulator drains
 // cleanly and generateStream yields its terminal LLMResponse.
 func captureStreamBody(t *testing.T, req *model.LLMRequest) map[string]any {
+	t.Helper()
+	return captureStreamBodyWithConfig(t, Config{}, req)
+}
+
+// captureStreamBodyWithConfig is captureStreamBody for a caller-provided
+// Config, so options that only show up on the wire can be asserted on the
+// streaming path too.
+func captureStreamBodyWithConfig(t *testing.T, cfg Config, req *model.LLMRequest) map[string]any {
 	t.Helper()
 
 	var captured []byte
@@ -122,7 +283,10 @@ func captureStreamBody(t *testing.T, req *model.LLMRequest) map[string]any {
 	}))
 	defer srv.Close()
 
-	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "gpt-test"})
+	cfg.BaseURL = srv.URL
+	cfg.APIKey = "test-key"
+	cfg.ModelName = "gpt-test"
+	m := New(cfg)
 
 	for _, err := range m.GenerateContent(context.Background(), req, true) {
 		if err != nil {

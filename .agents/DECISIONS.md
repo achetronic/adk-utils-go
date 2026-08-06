@@ -271,6 +271,242 @@ inclusive and unchanged.
 - **Missing details:** compatible providers that omit the field leave it at
   zero; genai's `omitempty` keeps the detail absent on serialisation.
 
+### O10 - Thought parts are re-emitted as reasoning, never merged into `content`
+
+Ingest turns a provider's `reasoning_content` into a thought Part
+(`Thought=true`) via `extractReasoningContent`; egress is the mirror image, and
+the two sides must stay symmetric. A thought Part must never reach the shared
+`textParts` slice: reasoning merged into `content` is indistinguishable from
+the reply, and it leaves the request without the literal `reasoning_content`
+key that some providers require.
+
+- **Decision:** `convertContentToMessages` collects thought Parts separately.
+  `Config.ReasoningEgress` picks the wire shape:
+  - `ReasoningEgressNative` (the zero value): the joined reasoning is attached
+    to the assistant message as its own field via the SDK's
+    `SetExtraFields`, next to `content` and `tool_calls`.
+  - `ReasoningEgressThinkTags`: the reasoning is prepended to `content` inside
+    a `<think>...</think>` block and no extra field is sent.
+  - `ReasoningEgressOmit`: no reasoning is sent in any shape.
+  `Config.ReasoningField` names the field (default `reasoning_content`) and is
+  used on ingest as well, so one knob describes the provider in both
+  directions. An unrecognised mode degrades to native.
+- **Why native by default:** DeepSeek in thinking mode returns a 400 ("the
+  reasoning_content in the thinking mode must be passed back to the API") when
+  an assistant message in history lacks the key, and Kimi K2 thinking needs it
+  to continue the chain of thought across tool calls. Both check for the key
+  itself, not for reasoning-shaped text somewhere in `content`, so reasoning
+  folded into `content` does not satisfy them.
+- **Why a mode at all:** a third group of OpenAI-compatible backends validates
+  messages against a schema that forbids unknown fields and answers the key
+  with a 400 `extra_forbidden` (observed on Mistral, TensorRT-LLM and several
+  gateways). No single unconditional shape is correct for every backend, so
+  the shape is a construction-time choice, like the rest of the per-provider
+  `Config` surface. Think tags are the fallback rather than dropping, so a
+  session recorded against one model can be replayed against another without
+  losing the trace.
+- **Why omit is never the default:** dropping reasoning fixes nothing for Qwen3
+  (which ignores history reasoning server-side unless `preserve_thinking` is
+  set) and breaks the two strict thinking providers, so it is opt-in only. It
+  exists because a caller who knows their backend discards reasoning history,
+  or who would rather not pay the prompt tokens, otherwise has to scrub
+  `genai.Content` themselves. Broader history hygiene still belongs in the
+  consumer (see the framing at the top of this doc).
+- **Assistant role only:** reasoning is dropped under any other role, the same
+  rule as A3. ADK's contents processor rewrites foreign-agent events as
+  user-role "For context:" content and passes non-text parts through verbatim;
+  that reasoning belongs to another conversation and no provider accepts it on
+  a user message.
+- **A reasoning-only turn sends no message in native mode:** an assistant
+  message with neither `content` nor `tool_calls` is not a valid Chat
+  Completions message, and there is no other turn to attach the field to. In
+  think-tag mode the reasoning *is* the content, so the message is sent.
+- **Read-only over the input (D2):** think-tag mode builds a new texts slice
+  instead of writing back into the caller's `genai.Content`.
+- **Symmetry with Anthropic (D5):** the Anthropic adapter already echoes
+  thinking blocks back in assistant turns, so native mode makes the two
+  adapters behave the same way for a reasoning round-trip. The mode and field
+  name are opt-in at construction and do not change the `model.LLM` runtime
+  contract.
+- **Tests:** `reasoning_test.go` pins the conversion contract (native field,
+  joined thoughts, tool-call turn, custom field name, think tags, omit,
+  unknown-mode fallback, reasoning-only turn, non-assistant role, text-less
+  thought Part); `wire_test.go` pins the bytes for each mode through
+  `captureBodyWithConfig`.
+
+### O11 - OpenRouter `reasoning_details` blocks round-trip through `Part.PartMetadata`
+
+OpenRouter normalises reasoning into a `reasoning_details` array of typed
+blocks (`reasoning.text` with an optional signature, `reasoning.summary`,
+`reasoning.encrypted`) alongside a plain-text copy. The encrypted variant is
+what models that do not expose readable reasoning hand back, and it is the case
+the plain-text field cannot express at all.
+
+- **Field names:** on responses OpenRouter uses `reasoning` and
+  `reasoning_details`. It never emits `reasoning_content`, which it accepts only
+  as an *input* alias for `reasoning`. `Config.ReasoningField` therefore has to
+  be set to `reasoning` for an OpenRouter caller, or ingest matches nothing.
+  Resolution stays strict single-name matching, with no alias fallback.
+- **Storage:** one thought Part per block, in wire order, with the block kept
+  verbatim in `Part.PartMetadata` under the exported
+  `ReasoningDetailMetadataKey` (`openai.reasoning_detail`). `Part.Text` mirrors
+  the readable text (`text` or `summary`) so consumers filtering on `Thought`
+  still see reasoning; an encrypted block yields a Part with empty `Text` and
+  metadata only, the same convention as A3's redacted thinking block. One Part
+  per block keeps the required order implicit in Part order.
+- **Blocks are opaque:** decoded as `map[string]any` and never re-typed,
+  reordered, filtered or rewritten, nulls included. OpenRouter requires the
+  replayed sequence of consecutive blocks to match what the model produced, the
+  block schema is open, and the documented `format` list keeps growing, so an
+  unknown block type or vendor key still round-trips.
+- **Ingest is never gated; egress is:** blocks are captured whenever they
+  appear, but only sent back when `Config.SupportsReasoningDetails` is set,
+  which defaults to off. Backends that validate messages against a closed
+  schema reject unknown fields (the same failure mode as O10), and a caller
+  cannot always know what sits behind a gateway. Capturing regardless means
+  turning the option on later still replays what earlier turns recorded.
+- **Blocks beat the plain-text field:** when both arrive they describe the same
+  reasoning and the blocks carry strictly more, so the string is skipped on
+  ingest. On egress a Part feeds either the array or the string, never both, so
+  reasoning is never sent twice; a history mixing Parts of both kinds populates
+  both fields from disjoint Parts.
+- **Degradation:** with the option off, a block's readable text falls back into
+  the plain-text field and an encrypted block is lost, having none. Think-tag
+  mode inlines the readable text for the same reason, since opaque bytes cannot
+  live inside `content`. Omit mode sends neither.
+- **Tests:** `reasoning_details_test.go`, including a byte-identical
+  response-to-request round trip, which is the property OpenRouter actually
+  requires.
+
+### O12 - Streamed reasoning is accumulated by the adapter, not read off the SDK accumulator
+
+`openai-go`'s `ChatCompletionAccumulator` merges chunks field by field and keeps
+**no raw JSON** on the message it aggregates (`accumulateDelta` states that it
+ignores the JSON field). Every reasoning field is non-standard and lives only in
+raw JSON, so `acc.Choices[0].Message.RawJSON()` is the empty string at the end
+of a real stream.
+
+- **Consequence:** probing that aggregate silently yields nothing, so a streamed
+  turn's terminal response carried no thought Part at all. The terminal response
+  is what becomes history, so streamed reasoning was lost even though the
+  partial responses carried it.
+- **Decision:** `generateStream` accumulates reasoning itself in
+  `reasoningAccumulator`: the plain-text field concatenates, and blocks merge by
+  their reported `index` (`text`, `summary` and `data` concatenate; `id`,
+  `format` and `signature` take the newest non-empty value, so a signature
+  arriving late is kept and a null never erases one). Blocks without an index
+  append in arrival order. `buildStreamFinalResponse` takes that state as an
+  argument.
+- **Do not "simplify" this back:** reading reasoning off the SDK aggregate looks
+  equivalent and is not. A test that builds an accumulator with `json.Unmarshal`
+  of a whole response passes while the live path is broken, because
+  unmarshalling populates raw JSON a stream never has. That is exactly how this
+  gap went unnoticed.
+- **Tests:** `reasoning_stream_test.go` drives real chunks through the public
+  streaming path against a fake SSE server: terminal response, cross-chunk block
+  merge including the late signature, partial responses, replay of a streamed
+  turn, and the untouched usage opt-in.
+
+---
+
+OpenRouter normalises reasoning into a `reasoning_details` array of typed
+blocks (`reasoning.text` with an optional signature, `reasoning.summary`,
+`reasoning.encrypted`) plus a plain-text copy. The encrypted variant is the
+case the plain-text field cannot express at all, and it is what models that do
+not expose readable reasoning hand back.
+
+- **Field names:** on responses OpenRouter uses `reasoning` and
+  `reasoning_details`. It never emits `reasoning_content`, which it accepts
+  only as an *input* alias for `reasoning`. `Config.ReasoningField` therefore
+  has to be set to `reasoning` for an OpenRouter caller, or ingest matches
+  nothing. Resolution is strict single-name matching; no alias fallback.
+- **Storage:** one thought Part per block, in wire order, with the block kept
+  verbatim in `Part.PartMetadata` under the exported
+  `ReasoningDetailMetadataKey` (`openai.reasoning_detail`). `Part.Text` mirrors
+  the readable text (`text` or `summary`) so consumers filtering on `Thought`
+  still see reasoning; an encrypted block yields a Part with empty `Text` and
+  metadata only, the same convention as A3's redacted thinking block. One Part
+  per block keeps the required order implicit in Part order.
+- **Blocks are opaque:** decoded as `map[string]any` and never re-typed,
+  reordered, filtered or rewritten, nulls included. OpenRouter requires the
+  replayed sequence of consecutive blocks to match what the model produced, the
+  block schema is open, and the documented `format` list keeps growing, so an
+  unknown block type or vendor key still round-trips. `reasoning_details_test.go`
+  pins a byte-identical response-to-request round trip.
+- **Ingest is never gated; egress is:** blocks are captured whenever they
+  appear, but only sent back when `Config.SupportsReasoningDetails` is set,
+  which defaults to off. Backends that validate messages against a
+  closed schema reject unknown fields (the same failure mode described in O10),
+  and a caller cannot always know what is on the other side of a gateway.
+  Capturing regardless means turning the option on later still replays what
+  earlier turns recorded.
+- **Blocks beat the plain-text field:** when both arrive they describe the same
+  reasoning and the blocks carry strictly more, so the string is skipped on
+  ingest. On egress a Part feeds either the array or the string, never both, so
+  reasoning is never sent twice; a history mixing Parts of both kinds populates
+  both fields from disjoint Parts.
+- **Degradation:** with the option off, a block's readable text falls back into
+  the plain-text field, and an encrypted block is lost because it has no text.
+  Think-tag mode does the same and inlines the readable text, since opaque
+  bytes cannot go inside `content`.
+
+### O12 - Streamed reasoning is accumulated by the adapter, not read off the SDK accumulator
+
+`openai-go`'s `ChatCompletionAccumulator` merges chunks field by field and
+keeps **no raw JSON** on the message it aggregates (`accumulateDelta` documents
+that it ignores the JSON field). Every reasoning field is non-standard and
+lives only in raw JSON, so `acc.Choices[0].Message.RawJSON()` is the empty
+string at the end of a real stream.
+
+- **Consequence found here:** probing that aggregate silently yielded nothing,
+  so a streamed turn's terminal response carried no thought Part at all. Since
+  the terminal response is what becomes history, streamed reasoning was lost
+  even though the partial responses carried it.
+- **Decision:** `generateStream` accumulates reasoning itself in
+  `reasoningAccumulator`: the plain-text field concatenates, and blocks merge
+  by their reported `index` (`text`, `summary` and `data` concatenate; `id`,
+  `format` and `signature` take the newest non-empty value, so a signature
+  arriving in a later chunk is kept and a null never erases it). Blocks without
+  an index append in arrival order. `buildStreamFinalResponse` takes that state
+  as an argument.
+- **Do not "simplify" this back:** reading reasoning from the SDK aggregate
+  looks equivalent and is not. A test that builds an accumulator with
+  `json.Unmarshal` of a whole response will pass while the live path is broken,
+  because unmarshalling populates the raw JSON a stream never has. That is
+  exactly how the original gap went unnoticed.
+- **Tests:** `reasoning_stream_test.go` drives real chunks through the public
+  streaming path against a fake SSE server, covering the terminal response, the
+  cross-chunk block merge (including the late signature), partial responses,
+  replay of a streamed turn, and the untouched usage opt-in.
+
+---
+
+### O13 - Provider extensions at the request root via `ExtraBody`
+
+OpenAI-compatible providers add top-level request fields that Chat Completions
+does not define: OpenRouter alone has `reasoning`, `provider`, `transforms` and
+`plugins`. `Config.ExtraBody map[string]any` is merged into the root of every
+request body through the same `SetExtraFields` escape hatch the reasoning fields
+use, on the streaming and non-streaming paths alike.
+
+- **Why config, not per request:** these describe the endpoint a Model points
+  at, decided once at construction like `BaseURL`. ADK's
+  `GenerateContentConfig` has no field to carry them, and adding typed options
+  per provider would drag the whole OpenRouter surface into this library.
+- **Why a map, not `[]option.RequestOption`:** the SDK's `option.WithJSONSet`
+  would work too, but exposing it leaks `openai-go` types into `Config`, which
+  otherwise uses only stdlib types. A map keeps the public surface
+  provider-agnostic.
+- **Collisions:** a key matching a field the adapter sets replaces it on the
+  wire, since extra fields win at marshal time. Documented as an extension
+  point rather than defended against: filtering keys would be its own surprise,
+  and the escape hatch is deliberate.
+- **Copied at construction:** `New` copies the caller's map, so a caller reusing
+  or mutating its own map cannot race with a request in flight, and Model state
+  stays read-only during conversion (D2).
+- **Tests:** `extra_body_test.go` covers the request root on both paths, nested
+  objects and arrays, an empty map changing nothing, and the defensive copy.
+
 ---
 
 ## Anthropic adapter (`genai/anthropic`)

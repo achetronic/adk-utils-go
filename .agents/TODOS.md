@@ -18,6 +18,28 @@ providers.
       probing has not been done for OpenAI, so its only integration test is the
       no-args tool call. Probe the live API for OpenAI's equivalent rules and add a
       canary+adapter test per confirmed rule.
+- [ ] **Reasoning egress is not covered by the schema tier.** The pinned OpenAI
+      spec does not set `additionalProperties: false` on the assistant message, so
+      step A accepts a `reasoning_content` key regardless of whether a given backend
+      would. Which backends accept the key (DeepSeek thinking, Kimi thinking,
+      OpenRouter) versus reject it (Mistral, TensorRT-LLM, some gateways) is only
+      knowable from a real call. Probe the ones we care about and record the outcome
+      next to the egress decision so callers get a concrete mode recommendation per
+      backend instead of a general rule. The same gap applies to `reasoning_details`:
+      every test for it is offline, so a replay has never been accepted by the real
+      OpenRouter API.
+- [ ] **Signature-less `reasoning.text` blocks are replayed as-is.** OpenRouter's
+      own SDK strips a `reasoning.text` block whose `signature` is missing before
+      sending it to an Anthropic-format model, because that model rejects the turn
+      otherwise. This adapter does not: dropping blocks would break the
+      sequence-matching rule, and a block only loses its signature if something
+      between ingest and egress mangled it. If a real backend turns out to bite, add
+      it as an explicit option rather than default behaviour.
+- [ ] **Reasoning blocks are invisible to context accounting.** A block kept in
+      `Part.PartMetadata` costs prompt tokens on replay (an encrypted blob is not
+      small), but the context guard's estimator only walks `Part.Text`, so a long
+      reasoning history is undercounted. Decide whether the estimator should account
+      for Part metadata.
 
 ## Anthropic semantic-rule gaps
 

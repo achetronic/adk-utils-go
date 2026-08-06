@@ -61,6 +61,80 @@ agent, _ := llmagent.New(llmagent.Config{
 })
 ```
 
+#### Reasoning
+
+Many OpenAI-compatible reasoning models (DeepSeek, Kimi K2 thinking, Qwen3-Thinking, ...) return their chain of thought in a non-standard field. The client reads it into a content part flagged `Thought: true`, and sends those parts back as reasoning rather than merging them into `content`. That round-trip is mandatory for some backends: DeepSeek in thinking mode and Kimi K2 thinking reject a conversation whose assistant messages have lost their reasoning.
+
+Other backends do the opposite and reject any field they do not know, so the shape is configurable:
+
+```go
+llmModel := genaiopenai.New(genaiopenai.Config{
+    APIKey:    os.Getenv("DEEPSEEK_API_KEY"),
+    BaseURL:   "https://api.deepseek.com/v1",
+    ModelName: "deepseek-chat",
+
+    // Default: reasoning travels as its own field on the assistant message.
+    ReasoningEgress: genaiopenai.ReasoningEgressNative,
+
+    // Names the field. Used when reading responses too.
+    ReasoningField: "reasoning_content",
+})
+
+// For a backend that rejects unknown message fields: the reasoning is kept,
+// wrapped in a <think> block at the start of the assistant content.
+llmModel = genaiopenai.New(genaiopenai.Config{
+    BaseURL:         "http://localhost:8000/v1",
+    ModelName:       "some-strict-backend",
+    ReasoningEgress: genaiopenai.ReasoningEgressThinkTags,
+})
+
+// For a backend that ignores reasoning history anyway, or to save the tokens:
+// send none of it back.
+llmModel = genaiopenai.New(genaiopenai.Config{
+    BaseURL:         "http://localhost:11434/v1",
+    ModelName:       "qwen3:8b",
+    ReasoningEgress: genaiopenai.ReasoningEgressOmit,
+})
+```
+
+Every field is optional. Reasoning is only ever attached to assistant messages: a thought part arriving under another role (ADK rewrites events from other agents as user content) is dropped, since no provider accepts it there.
+
+#### Reasoning through OpenRouter
+
+OpenRouter needs two settings. It returns its plain-text reasoning under `reasoning`, not `reasoning_content` (which it accepts only as an input alias), so point `ReasoningField` at `reasoning` or nothing is read back. It also returns a structured `reasoning_details` array for models whose reasoning is summarised or encrypted, which is the only way to preserve reasoning for models that do not hand back readable text. Sending that array back is opt-in, since backends that do not know the field reject it:
+
+```go
+llmModel := genaiopenai.New(genaiopenai.Config{
+    APIKey:    os.Getenv("OPENROUTER_API_KEY"),
+    BaseURL:   "https://openrouter.ai/api/v1",
+    ModelName: "anthropic/claude-sonnet-4.6",
+
+    ReasoningField:           "reasoning",
+    SupportsReasoningDetails: true,
+})
+```
+
+Reasoning blocks are preserved on the content part they came from (in `Part.PartMetadata`, under `genaiopenai.ReasoningDetailMetadataKey`) and replayed byte for byte, in order, because OpenRouter requires the sequence to match what the model produced. This matters most for tool calling: a model that pauses mid-reasoning to call a tool resumes from those blocks once the result comes back. Blocks are captured whether or not you enable sending them, so turning the option on later still replays what earlier turns recorded.
+
+#### Provider-specific request fields
+
+Providers add top-level request fields that the OpenAI schema does not define. `ExtraBody` is merged into the root of every request, streaming or not, which is how you turn reasoning on in the first place for OpenRouter and how you reach its routing controls:
+
+```go
+llmModel := genaiopenai.New(genaiopenai.Config{
+    APIKey:    os.Getenv("OPENROUTER_API_KEY"),
+    BaseURL:   "https://openrouter.ai/api/v1",
+    ModelName: "anthropic/claude-sonnet-4.6",
+
+    ExtraBody: map[string]any{
+        "reasoning": map[string]any{"effort": "high"},
+        "provider":  map[string]any{"order": []any{"anthropic"}},
+    },
+})
+```
+
+Values just need to be JSON-serialisable. The map is copied when the client is built, so changing your copy afterwards does not affect requests. A key that collides with something the client sets (`model`, `messages`, ...) replaces it on the wire, so treat it as an extension point rather than a way to rewrite the request.
+
 ### Anthropic Client
 
 Native Anthropic Claude support:
@@ -137,6 +211,7 @@ Both clients support:
 - Image inputs: inline bytes (`InlineData`, sent as base64) or remote URLs (`FileData`, passed through to the provider's image-URL field; nothing is downloaded or re-encoded)
 - Temperature, TopP, MaxOutputTokens, StopSequences
 - Extended thinking: classic budget API (`ThinkingBudgetTokens`) and adaptive effort API (`ThinkingEffort` + `ThinkingMode`)
+- Reasoning round-trip: reasoning is read into `Thought` parts and sent back as a separate field (OpenAI) or as thinking blocks (Anthropic), never merged into the reply text
 - Usage metadata
 - Custom HTTP headers (multi-value)
 

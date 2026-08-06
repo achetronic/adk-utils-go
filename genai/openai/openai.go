@@ -37,11 +37,52 @@ var (
 // OpenAI enforces a 40-character limit on tool_call_id fields.
 const maxToolCallIDLength = 40
 
+// defaultReasoningField is the field name reasoning providers use for hidden
+// chain-of-thought on both ingest and egress.
+const defaultReasoningField = "reasoning_content"
+
+// ReasoningEgressMode selects the wire shape used to send a thought Part back
+// to the provider as conversation history.
+type ReasoningEgressMode string
+
+const (
+	// ReasoningEgressNative sends the reasoning as its own field on the
+	// assistant message, next to content and tool_calls. This is what
+	// DeepSeek in thinking mode and Kimi K2 thinking require, and the zero
+	// value of the mode.
+	ReasoningEgressNative ReasoningEgressMode = "native"
+	// ReasoningEgressThinkTags folds the reasoning into the assistant
+	// message's content, wrapped in a <think> block. For backends that
+	// validate messages against a schema forbidding extra fields and answer
+	// a reasoning field with a 400.
+	ReasoningEgressThinkTags ReasoningEgressMode = "think_tags"
+	// ReasoningEgressOmit sends no reasoning at all: thought Parts are
+	// dropped instead of being re-emitted in any shape. For backends that
+	// ignore reasoning history anyway (Qwen3 discards it server-side unless
+	// asked to preserve it) or callers who would rather not spend the tokens.
+	// Never a default: DeepSeek in thinking mode and Kimi K2 thinking reject
+	// a history whose reasoning is missing.
+	ReasoningEgressOmit ReasoningEgressMode = "omit"
+)
+
 // Model implements model.LLM using the official OpenAI Go SDK.
 // Works with OpenAI API and compatible providers (Ollama, vLLM, etc.).
 type Model struct {
 	client    *openai.Client
 	modelName string
+
+	// reasoningEgress and reasoningField are normalised in New, so the
+	// converters never have to re-derive a default.
+	reasoningEgress ReasoningEgressMode
+	reasoningField  string
+	// reasoningDetails gates egress of the reasoning_details array. Ingest
+	// captures it either way.
+	reasoningDetails bool
+
+	// extraBody holds provider extensions merged into every request body. It
+	// is a copy of the caller's map, read-only from here on, so concurrent
+	// requests can share it.
+	extraBody map[string]any
 
 	// toolCallIDMap stores original IDs when they exceed OpenAI's limit.
 	// Keys are shortened hashes, values are original IDs.
@@ -66,6 +107,36 @@ type Config struct {
 	ModelName string
 	// HTTPOptions holds optional HTTP-level overrides (e.g. extra headers).
 	HTTPOptions HTTPOptions
+	// ReasoningEgress selects how thought Parts are sent back as history.
+	// Empty (the zero value) means ReasoningEgressNative. Use
+	// ReasoningEgressThinkTags for backends that reject a reasoning field, or
+	// ReasoningEgressOmit to send no reasoning at all.
+	ReasoningEgress ReasoningEgressMode
+	// ReasoningField names the provider's plain-text reasoning field, read on
+	// ingest and written on egress. Empty means "reasoning_content". OpenRouter
+	// returns this reasoning under "reasoning" and only accepts
+	// "reasoning_content" as an input alias, so point this at "reasoning"
+	// there or nothing is read back.
+	ReasoningField string
+	// SupportsReasoningDetails allows the adapter to send OpenRouter's
+	// reasoning_details array back as history. Leave it off for backends that
+	// do not know the field. Reasoning details found in a response are always
+	// kept on the Part, whatever this is set to, so enabling it later still
+	// replays what earlier turns captured.
+	SupportsReasoningDetails bool
+	// ExtraBody carries provider extensions that Chat Completions does not
+	// define, merged into the root of every request body. OpenRouter's
+	// reasoning controls live here, for example:
+	//
+	//	ExtraBody: map[string]any{
+	//		"reasoning": map[string]any{"effort": "high"},
+	//	}
+	//
+	// Values must be JSON-serialisable. A key that collides with a field the
+	// adapter sets replaces it on the wire, so this is an extension point,
+	// not a way to rewrite messages or model. The map is copied at
+	// construction, so mutating the caller's copy afterwards changes nothing.
+	ExtraBody map[string]any
 }
 
 // New creates a new OpenAI Model with the given configuration.
@@ -89,10 +160,36 @@ func New(cfg Config) *Model {
 
 	client := openai.NewClient(opts...)
 
+	reasoningField := cfg.ReasoningField
+	if reasoningField == "" {
+		reasoningField = defaultReasoningField
+	}
+	// An unrecognised mode degrades to the native shape reasoning providers
+	// document rather than to silent data loss.
+	reasoningEgress := ReasoningEgressNative
+	switch cfg.ReasoningEgress {
+	case ReasoningEgressThinkTags, ReasoningEgressOmit:
+		reasoningEgress = cfg.ReasoningEgress
+	}
+
+	// Copied so a caller mutating its own map later cannot race with a
+	// request in flight.
+	var extraBody map[string]any
+	if len(cfg.ExtraBody) > 0 {
+		extraBody = make(map[string]any, len(cfg.ExtraBody))
+		for k, v := range cfg.ExtraBody {
+			extraBody[k] = v
+		}
+	}
+
 	return &Model{
-		client:        &client,
-		modelName:     cfg.ModelName,
-		toolCallIDMap: make(map[string]string),
+		client:           &client,
+		modelName:        cfg.ModelName,
+		reasoningEgress:  reasoningEgress,
+		reasoningField:   reasoningField,
+		reasoningDetails: cfg.SupportsReasoningDetails,
+		extraBody:        extraBody,
+		toolCallIDMap:    make(map[string]string),
 	}
 }
 
@@ -153,6 +250,11 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 
 		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
+		// Reasoning is accumulated here rather than read back off acc at the
+		// end: the SDK accumulator merges chunks field by field and keeps no
+		// raw JSON on the aggregated message, so every non-standard field
+		// (all reasoning is non-standard) is gone by the time the stream ends.
+		reasoningAcc := &reasoningAccumulator{}
 
 		// Yield partial responses as chunks arrive
 		for stream.Next() {
@@ -164,14 +266,19 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			}
 
 			delta := chunk.Choices[0].Delta
-			// reasoning_content is a non-standard field used by OpenAI-compatible
-			// providers (Kimi K2.6, DeepSeek-R1, Qwen3-Thinking, etc.) to stream
-			// hidden chain-of-thought tokens. The official OpenAI schema does not
-			// include it, so it is read from the raw JSON envelope rather than a
-			// typed field on Delta. See extractReasoningContent for details.
-			reasoning := extractReasoningContent(delta.RawJSON())
+			// Reasoning arrives in fields the official Chat Completions schema
+			// does not define, so it is read from the raw JSON envelope rather
+			// than a typed field on Delta: a plain-text field used by
+			// OpenAI-compatible providers (Kimi K2.6, DeepSeek-R1,
+			// Qwen3-Thinking, etc.), and OpenRouter's structured
+			// reasoning_details array. See extractReasoningContent and
+			// extractReasoningDetails.
+			reasoning := extractReasoningContent(delta.RawJSON(), m.reasoningField)
+			details := extractReasoningDetails(delta.RawJSON())
+			reasoningAcc.addText(reasoning)
+			reasoningAcc.addBlocks(details)
 
-			if delta.Content == "" && reasoning == "" {
+			if delta.Content == "" && reasoning == "" && len(details) == 0 {
 				continue
 			}
 
@@ -181,7 +288,12 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			// (e.g. ADK's llmagent) iterate parts and filter on Thought, so
 			// having reasoning first matches the natural transcript order.
 			var parts []*genai.Part
-			if reasoning != "" {
+			switch {
+			case len(details) > 0:
+				// Blocks carry the same reasoning as the plain-text field plus
+				// signatures and encrypted data, so they replace it here.
+				parts = append(parts, reasoningDetailsToParts(details)...)
+			case reasoning != "":
 				parts = append(parts, &genai.Part{Text: reasoning, Thought: true})
 			}
 			if delta.Content != "" {
@@ -207,27 +319,27 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 		}
 
 		// Build and yield final aggregated response
-		yield(m.buildStreamFinalResponse(&acc), nil)
+		yield(m.buildStreamFinalResponse(&acc, reasoningAcc), nil)
 	}
 }
 
-// buildStreamFinalResponse creates the final LLMResponse from accumulated stream data.
-func (m *Model) buildStreamFinalResponse(acc *openai.ChatCompletionAccumulator) *model.LLMResponse {
+// buildStreamFinalResponse creates the final LLMResponse from accumulated
+// stream data. Reasoning comes from the adapter's own accumulator, not from
+// acc: the SDK aggregate keeps no raw JSON, so there is nothing to read there.
+func (m *Model) buildStreamFinalResponse(acc *openai.ChatCompletionAccumulator, reasoning *reasoningAccumulator) *model.LLMResponse {
 	content := &genai.Content{
 		Role:  genai.RoleModel,
 		Parts: []*genai.Part{},
 	}
 
+	// Reasoning Parts go before the final-answer Part to preserve the
+	// temporal order in which the model produced the tokens.
+	if reasoning != nil {
+		content.Parts = append(content.Parts, reasoning.parts()...)
+	}
+
 	if len(acc.Choices) > 0 {
 		choice := acc.Choices[0]
-
-		// Same rationale as in generateStream: read reasoning_content from the
-		// raw JSON since openai-go does not type the non-standard field.
-		// Reasoning Part goes before the final-answer Part to preserve the
-		// temporal order in which the model produced the tokens.
-		if reasoning := extractReasoningContent(choice.Message.RawJSON()); reasoning != "" {
-			content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
-		}
 
 		if choice.Message.Content != "" {
 			content.Parts = append(content.Parts, &genai.Part{Text: choice.Message.Content})
@@ -286,6 +398,13 @@ func (m *Model) buildChatCompletionParams(req *model.LLMRequest) (openai.ChatCom
 	// Apply optional configuration
 	if req.Config != nil {
 		m.applyGenerationConfig(&params, req.Config)
+	}
+
+	// Provider extensions go on last so they land at the root of the body.
+	// The SDK has no typed field for them, so they travel through the same
+	// extra-fields escape hatch the reasoning fields use.
+	if len(m.extraBody) > 0 {
+		params.SetExtraFields(m.extraBody)
 	}
 
 	return params, nil
@@ -394,11 +513,30 @@ func (m *Model) applyGenerationConfig(params *openai.ChatCompletionNewParams, cf
 func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatCompletionMessageParamUnion, error) {
 	var messages []openai.ChatCompletionMessageParamUnion
 	var textParts []string
+	var reasoningParts []string
+	var reasoningBlocks []map[string]any
 	var toolCalls []openai.ChatCompletionMessageToolCallUnionParam
 	var mediaParts []openai.ChatCompletionContentPartUnionParam
 
 	for _, part := range content.Parts {
 		switch {
+		// Reasoning is collected apart from the reply text: merging the two
+		// into content hides the chain of thought inside the answer and
+		// leaves out the field DeepSeek in thinking mode and Kimi K2
+		// thinking require to be echoed back. This branch comes first
+		// because a thought Part also carries its text in Text.
+		//
+		// A Part carrying an OpenRouter reasoning block goes back as that
+		// block, which holds strictly more than its text (signature,
+		// encrypted data, id). Where the block cannot be sent, its readable
+		// text is used instead, and an encrypted block has none to offer.
+		case part.Thought:
+			if block, ok := reasoningDetailOf(part); ok && m.emitsReasoningDetails() {
+				reasoningBlocks = append(reasoningBlocks, block)
+			} else if part.Text != "" {
+				reasoningParts = append(reasoningParts, part.Text)
+			}
+
 		case part.FunctionResponse != nil:
 			responseJSON, err := common.MarshalToolPayload(part.FunctionResponse.Response)
 			if err != nil {
@@ -442,8 +580,41 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 		}
 	}
 
+	// Reasoning only belongs to an assistant turn. ADK's contents processor
+	// rewrites events authored by a different agent as user-role "For
+	// context:" content and passes non-text parts through verbatim, so a
+	// thought Part can legitimately arrive under a user role; that reasoning
+	// belongs to another conversation, and no provider accepts it on a user
+	// message, so it is dropped.
+	var reasoning reasoningPayload
+	if convertRole(content.Role) == "assistant" {
+		reasoning = reasoningPayload{
+			text:    joinTexts(reasoningParts),
+			details: reasoningBlocks,
+		}
+	}
+
+	switch m.reasoningEgress {
+	// In think-tag mode the reasoning becomes part of content, ahead of the
+	// reply, which is the order the model produced it in. A new slice keeps
+	// the converter read-only over its input. Blocks never reach here in
+	// that mode: emitsReasoningDetails already routed their text into
+	// reasoningParts.
+	case ReasoningEgressThinkTags:
+		if reasoning.text != "" {
+			textParts = append([]string{"<think>\n" + reasoning.text + "\n</think>"}, textParts...)
+		}
+		reasoning = reasoningPayload{}
+	// Omit mode drops the reasoning outright, in every shape.
+	case ReasoningEgressOmit:
+		reasoning = reasoningPayload{}
+	}
+
+	// Reasoning alone does not produce a message: an assistant message with
+	// neither content nor tool_calls is not a valid Chat Completions
+	// message, and there is no other turn to attach the field to.
 	if len(textParts) > 0 || len(mediaParts) > 0 || len(toolCalls) > 0 {
-		msg := m.buildRoleMessage(content.Role, textParts, mediaParts, toolCalls)
+		msg := m.buildRoleMessage(content.Role, textParts, mediaParts, toolCalls, reasoning)
 		if msg != nil {
 			messages = append(messages, *msg)
 		}
@@ -452,13 +623,37 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 	return messages, nil
 }
 
+// emitsReasoningDetails reports whether an OpenRouter reasoning block is sent
+// back as part of a reasoning_details array. Only the native mode has a field
+// to put it in: think-tag mode sends no extra fields, so blocks degrade to
+// their readable text, and omit mode sends no reasoning at all.
+func (m *Model) emitsReasoningDetails() bool {
+	return m.reasoningDetails && m.reasoningEgress == ReasoningEgressNative
+}
+
+// reasoningPayload is what a turn's thought Parts contribute to the outgoing
+// assistant message: the plain-text reasoning field, the structured
+// reasoning_details array, or both when the history mixes Parts of each kind.
+// A given Part feeds exactly one of them, so reasoning is never sent twice.
+type reasoningPayload struct {
+	text    string
+	details []map[string]any
+}
+
+// isEmpty reports whether there is no reasoning to send.
+func (r reasoningPayload) isEmpty() bool {
+	return r.text == "" && len(r.details) == 0
+}
+
 // buildRoleMessage creates the appropriate message type based on role.
-func (m *Model) buildRoleMessage(role string, texts []string, media []openai.ChatCompletionContentPartUnionParam, toolCalls []openai.ChatCompletionMessageToolCallUnionParam) *openai.ChatCompletionMessageParamUnion {
+// reasoning is only meaningful for the assistant role; the other roles have
+// no field to carry it.
+func (m *Model) buildRoleMessage(role string, texts []string, media []openai.ChatCompletionContentPartUnionParam, toolCalls []openai.ChatCompletionMessageToolCallUnionParam, reasoning reasoningPayload) *openai.ChatCompletionMessageParamUnion {
 	switch convertRole(role) {
 	case "user":
 		return buildUserMessage(texts, media)
 	case "assistant":
-		return buildAssistantMessage(texts, toolCalls)
+		return buildAssistantMessage(texts, toolCalls, reasoning, m.reasoningField)
 	case "system":
 		msg := openai.SystemMessage(joinTexts(texts))
 		return &msg
@@ -490,8 +685,12 @@ func buildUserMessage(texts []string, media []openai.ChatCompletionContentPartUn
 	}
 }
 
-// buildAssistantMessage creates an assistant message with optional tool calls.
-func buildAssistantMessage(texts []string, toolCalls []openai.ChatCompletionMessageToolCallUnionParam) *openai.ChatCompletionMessageParamUnion {
+// buildAssistantMessage creates an assistant message with optional tool calls
+// and reasoning. Neither reasoning field is defined by the Chat Completions
+// schema, so both are attached through the SDK's extra-fields escape hatch
+// instead of typed fields. Blocks go out exactly as they arrived: OpenRouter
+// requires the replayed sequence to match what the model produced.
+func buildAssistantMessage(texts []string, toolCalls []openai.ChatCompletionMessageToolCallUnionParam, reasoning reasoningPayload, reasoningField string) *openai.ChatCompletionMessageParamUnion {
 	msg := openai.ChatCompletionAssistantMessageParam{}
 
 	if len(texts) > 0 {
@@ -501,6 +700,18 @@ func buildAssistantMessage(texts []string, toolCalls []openai.ChatCompletionMess
 	}
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
+	}
+	if !reasoning.isEmpty() {
+		extra := make(map[string]any, 2)
+		if reasoning.text != "" && reasoningField != "" {
+			extra[reasoningField] = reasoning.text
+		}
+		if len(reasoning.details) > 0 {
+			extra[reasoningDetailsField] = reasoning.details
+		}
+		if len(extra) > 0 {
+			msg.SetExtraFields(extra)
+		}
 	}
 
 	return &openai.ChatCompletionMessageParamUnion{OfAssistant: &msg}
@@ -518,10 +729,15 @@ func (m *Model) convertResponse(resp *openai.ChatCompletion) (*model.LLMResponse
 		Parts: []*genai.Part{},
 	}
 
-	// Same rationale as in buildStreamFinalResponse: read reasoning_content
-	// from the raw JSON since openai-go does not type the non-standard field
-	// used by OpenAI-compatible reasoning providers.
-	if reasoning := extractReasoningContent(choice.Message.RawJSON()); reasoning != "" {
+	// Reasoning is read from the raw JSON since openai-go does not type the
+	// non-standard fields OpenAI-compatible reasoning providers use. When
+	// OpenRouter sends its structured reasoning_details array it takes
+	// precedence: the array describes the same reasoning as the plain-text
+	// field but keeps the signatures and encrypted blocks the next turn may
+	// need, so honouring both would duplicate the reasoning.
+	if details := extractReasoningDetails(choice.Message.RawJSON()); len(details) > 0 {
+		content.Parts = append(content.Parts, reasoningDetailsToParts(details)...)
+	} else if reasoning := extractReasoningContent(choice.Message.RawJSON(), m.reasoningField); reasoning != "" {
 		content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
 	}
 
@@ -847,8 +1063,9 @@ func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentRe
 	}
 }
 
-// extractReasoningContent reads the non-standard "reasoning_content" field
-// from the SDK's raw JSON envelope.
+// extractReasoningContent reads the non-standard reasoning field named by
+// field ("reasoning_content" unless the caller configured another one) from
+// the SDK's raw JSON envelope.
 //
 // Chat Completions does not define this field: OpenAI's own reasoning models
 // hide the reasoning text and report only the token count. Compatible
@@ -856,19 +1073,25 @@ func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentRe
 // choices[].message and choices[].delta. openai-go does not type it but
 // keeps it in the raw JSON, reachable via RawJSON().
 //
-// Returns "" when the field is absent, empty, or unparseable; callers treat
-// empty as "no reasoning content" and skip the thought Part.
-func extractReasoningContent(rawJSON string) string {
-	if rawJSON == "" {
+// Returns "" when the field is absent, empty, not a string, or unparseable;
+// callers treat empty as "no reasoning content" and skip the thought Part.
+func extractReasoningContent(rawJSON, field string) string {
+	if rawJSON == "" || field == "" {
 		return ""
 	}
-	var probe struct {
-		ReasoningContent string `json:"reasoning_content"`
-	}
+	var probe map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(rawJSON), &probe); err != nil {
 		return ""
 	}
-	return probe.ReasoningContent
+	raw, ok := probe[field]
+	if !ok {
+		return ""
+	}
+	var reasoning string
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		return ""
+	}
+	return reasoning
 }
 
 // convertRole maps genai roles to OpenAI roles.

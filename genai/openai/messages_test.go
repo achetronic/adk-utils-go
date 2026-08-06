@@ -225,7 +225,7 @@ func TestBuildRoleMessage(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := newModelForTest()
 			toolCalls := make([]openai.ChatCompletionMessageToolCallUnionParam, c.toolCalls)
-			got := m.buildRoleMessage(c.role, c.texts, nil, toolCalls)
+			got := m.buildRoleMessage(c.role, c.texts, nil, toolCalls, reasoningPayload{})
 
 			if c.wantKind == "" {
 				if got != nil {
@@ -265,7 +265,7 @@ func TestBuildAssistantMessage(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			toolCalls := make([]openai.ChatCompletionMessageToolCallUnionParam, c.toolCalls)
-			got := buildAssistantMessage(c.texts, toolCalls)
+			got := buildAssistantMessage(c.texts, toolCalls, reasoningPayload{}, defaultReasoningField)
 			if got == nil {
 				t.Fatalf("buildAssistantMessage returned nil")
 			}

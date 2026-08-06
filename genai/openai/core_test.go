@@ -277,6 +277,9 @@ func TestNormalizeToolCallID(t *testing.T) {
 	})
 }
 
+// newModelForTest builds the model through New so the conversion tests run
+// against the same normalised defaults a caller gets (reasoning egress mode
+// and reasoning field name included).
 func newModelForTest() *Model {
-	return &Model{toolCallIDMap: make(map[string]string)}
+	return New(Config{ModelName: "gpt-test"})
 }

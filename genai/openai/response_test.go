@@ -131,7 +131,7 @@ func TestConvertResponse(t *testing.T) {
 func TestBuildStreamFinalResponse(t *testing.T) {
 	t.Run("empty accumulator returns an empty but valid response", func(t *testing.T) {
 		m := newModelForTest()
-		got := m.buildStreamFinalResponse(&openai.ChatCompletionAccumulator{})
+		got := m.buildStreamFinalResponse(&openai.ChatCompletionAccumulator{}, &reasoningAccumulator{})
 		if got == nil {
 			t.Fatalf("expected non-nil response")
 		}
@@ -166,7 +166,7 @@ func TestBuildStreamFinalResponse(t *testing.T) {
 				Usage: openai.CompletionUsage{TotalTokens: 9},
 			},
 		}
-		got := m.buildStreamFinalResponse(acc)
+		got := m.buildStreamFinalResponse(acc, &reasoningAccumulator{})
 		if got.FinishReason != genai.FinishReasonStop {
 			t.Errorf("FinishReason = %v, want Stop", got.FinishReason)
 		}
@@ -249,12 +249,12 @@ func TestConvertThinkingLevel(t *testing.T) {
 	}
 }
 
-// extractReasoningContent reads the non-standard "reasoning_content" field
-// from the raw JSON envelope that openai-go preserves on every typed
-// response struct. The function exists because OpenAI-compatible providers
-// (Kimi K2.6, DeepSeek-R1, Qwen3-Thinking, etc.) extend the Chat Completions
-// schema with this field, and openai-go does NOT type it - it lives only in
-// JSON.raw / ExtraFields.
+// extractReasoningContent reads the non-standard reasoning field (named by
+// the caller, "reasoning_content" by default) from the raw JSON envelope that
+// openai-go preserves on every typed response struct. The function exists
+// because OpenAI-compatible providers (Kimi K2.6, DeepSeek-R1,
+// Qwen3-Thinking, etc.) extend the Chat Completions schema with this field,
+// and openai-go does NOT type it - it lives only in JSON.raw / ExtraFields.
 //
 // The contract is: return the field value verbatim if present and non-empty,
 // "" otherwise. Malformed JSON must yield "" rather than an error because
@@ -262,14 +262,21 @@ func TestConvertThinkingLevel(t *testing.T) {
 // layer, dropping a thought Part is the safe degradation.
 func TestExtractReasoningContent(t *testing.T) {
 	cases := []struct {
-		name string
-		raw  string
-		want string
+		name  string
+		raw   string
+		field string
+		want  string
 	}{
 		{
 			name: "empty raw returns empty",
 			raw:  "",
 			want: "",
+		},
+		{
+			name:  "custom field name is read instead of the default",
+			raw:   `{"reasoning":"gateway reasoning","reasoning_content":"ignored"}`,
+			field: "reasoning",
+			want:  "gateway reasoning",
 		},
 		{
 			name: "raw without reasoning_content returns empty",
@@ -300,11 +307,21 @@ func TestExtractReasoningContent(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := extractReasoningContent(c.raw); got != c.want {
-				t.Errorf("extractReasoningContent(%q) = %q, want %q", c.raw, got, c.want)
+			field := c.field
+			if field == "" {
+				field = defaultReasoningField
+			}
+			if got := extractReasoningContent(c.raw, field); got != c.want {
+				t.Errorf("extractReasoningContent(%q, %q) = %q, want %q", c.raw, field, got, c.want)
 			}
 		})
 	}
+
+	t.Run("no field name returns empty", func(t *testing.T) {
+		if got := extractReasoningContent(`{"reasoning_content":"thinking"}`, ""); got != "" {
+			t.Errorf("extractReasoningContent with no field name = %q, want empty", got)
+		}
+	})
 }
 
 // convertResponse must surface reasoning_content as a separate Part with
@@ -452,15 +469,17 @@ func TestConvertResponse_WithReasoningContent(t *testing.T) {
 	})
 }
 
-// buildStreamFinalResponse must also surface reasoning_content as a leading
-// Thought part. The implementation path is shared with convertResponse but
-// reads from the accumulator, so a parallel regression test is needed.
+// buildStreamFinalResponse must surface the reasoning the adapter
+// accumulated across chunks as a leading Thought part, ahead of the answer.
 //
-// The accumulator embeds a ChatCompletion by value, so populating
-// acc.ChatCompletion via json.Unmarshal produces the same observable state
-// as a live stream that finished aggregating the chunks.
+// The reasoning cannot come from the accumulator argument: openai-go's
+// accumulator merges chunks field by field and keeps no raw JSON on the
+// aggregated message, so every non-standard field is already gone. Feeding
+// the reasoning in separately is what keeps a streamed turn's reasoning
+// alive. TestGenerateStream_ReasoningReachesFinalResponse covers the same
+// ground end to end, through real chunks.
 func TestBuildStreamFinalResponse_WithReasoningContent(t *testing.T) {
-	t.Run("aggregated stream surfaces reasoning_content", func(t *testing.T) {
+	t.Run("accumulated reasoning leads the final parts", func(t *testing.T) {
 		raw := []byte(`{
             "id": "chatcmpl-s",
             "object": "chat.completion",
@@ -468,11 +487,7 @@ func TestBuildStreamFinalResponse_WithReasoningContent(t *testing.T) {
             "model": "kimi-k2.6",
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "Sure, here is the result.",
-                    "reasoning_content": "Streamed chain-of-thought."
-                },
+                "message": {"role": "assistant", "content": "Sure, here is the result."},
                 "finish_reason": "stop"
             }],
             "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
@@ -483,9 +498,12 @@ func TestBuildStreamFinalResponse_WithReasoningContent(t *testing.T) {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		acc := &openai.ChatCompletionAccumulator{ChatCompletion: cc}
+		reasoning := &reasoningAccumulator{}
+		reasoning.addText("Streamed ")
+		reasoning.addText("chain-of-thought.")
 
 		m := newModelForTest()
-		got := m.buildStreamFinalResponse(acc)
+		got := m.buildStreamFinalResponse(acc, reasoning)
 
 		if len(got.Content.Parts) != 2 {
 			t.Fatalf("expected 2 parts, got %d", len(got.Content.Parts))
@@ -501,6 +519,35 @@ func TestBuildStreamFinalResponse_WithReasoningContent(t *testing.T) {
 		}
 		if got.Content.Parts[1].Text != "Sure, here is the result." {
 			t.Errorf("second part text = %q", got.Content.Parts[1].Text)
+		}
+	})
+
+	t.Run("no reasoning leaves a single answer part", func(t *testing.T) {
+		raw := []byte(`{
+            "id": "chatcmpl-t",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "plain reply"},
+                "finish_reason": "stop"
+            }]
+        }`)
+
+		var cc openai.ChatCompletion
+		if err := json.Unmarshal(raw, &cc); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+
+		m := newModelForTest()
+		got := m.buildStreamFinalResponse(&openai.ChatCompletionAccumulator{ChatCompletion: cc}, &reasoningAccumulator{})
+
+		if len(got.Content.Parts) != 1 {
+			t.Fatalf("expected 1 part, got %d", len(got.Content.Parts))
+		}
+		if got.Content.Parts[0].Thought {
+			t.Errorf("Thought = true, want false for a response without reasoning")
 		}
 	})
 }
