@@ -400,6 +400,12 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 	for _, part := range content.Parts {
 		switch {
 		case part.FunctionResponse != nil:
+			// Skip ADK internal framework parts (HITL confirmation
+			// protocol): upstream providers reject them as undeclared
+			// tool messages.
+			if common.IsADKInternalCall(part.FunctionResponse.Name) {
+				continue
+			}
 			responseJSON, err := common.MarshalToolPayload(part.FunctionResponse.Response)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)
@@ -408,6 +414,9 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 			messages = append(messages, openai.ToolMessage(string(responseJSON), normalizedID))
 
 		case part.FunctionCall != nil:
+			if common.IsADKInternalCall(part.FunctionCall.Name) {
+				continue
+			}
 			argsJSON, err := common.MarshalToolPayload(part.FunctionCall.Args)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function args: %w", err)

@@ -5,7 +5,11 @@
 // rules are implemented once.
 package common
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"google.golang.org/adk/v2/tool/toolconfirmation"
+)
 
 var emptyJSONObject = json.RawMessage(`{}`)
 
@@ -33,4 +37,13 @@ func MarshalToolPayload(payload any) (json.RawMessage, error) {
 		return emptyJSONObject, nil
 	}
 	return data, nil
+}
+
+// IsADKInternalCall reports whether a function call or response name belongs
+// to an internal ADK framework protocol (e.g. HITL tool confirmation) rather
+// than to a model-declared tool. Adapters must skip these parts: they are
+// framework bookkeeping and upstream providers reject them with 400 because
+// they are not tools the model has declared.
+func IsADKInternalCall(name string) bool {
+	return name == toolconfirmation.FunctionCallName
 }
