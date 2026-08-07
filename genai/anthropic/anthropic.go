@@ -480,17 +480,27 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 		// reasoning blocks are useless as context (their signatures belong
 		// to another conversation anyway), so drop them instead of letting
 		// the API bounce the request.
+		//
+		// Furthermore, Anthropic rejects thinking blocks in assistant messages
+		// if they lack a valid signature (e.g., when signatures are stripped
+		// by context hygiene or when switching models in the same session).
+		// If an assistant thought Part has non-empty text but no signature,
+		// emit it as plain text instead of an invalid thinking block.
 		if part.Thought {
 			if role != anthropic.MessageParamRoleAssistant {
 				continue
 			}
 			if part.Text != "" {
-				blocks = append(blocks, anthropic.ContentBlockParamUnion{
-					OfThinking: &anthropic.ThinkingBlockParam{
-						Thinking:  part.Text,
-						Signature: string(part.ThoughtSignature),
-					},
-				})
+				if len(part.ThoughtSignature) > 0 {
+					blocks = append(blocks, anthropic.ContentBlockParamUnion{
+						OfThinking: &anthropic.ThinkingBlockParam{
+							Thinking:  part.Text,
+							Signature: string(part.ThoughtSignature),
+						},
+					})
+				} else {
+					blocks = append(blocks, anthropic.NewTextBlock(part.Text))
+				}
 			} else if len(part.ThoughtSignature) > 0 {
 				blocks = append(blocks, anthropic.ContentBlockParamUnion{
 					OfRedactedThinking: &anthropic.RedactedThinkingBlockParam{

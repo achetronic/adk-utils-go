@@ -463,12 +463,20 @@ Applied to both tool_use and tool_result IDs so they still match afterwards.
   blob in `ThoughtSignature`.
 - On the way *out* (`convertContentToMessage`): thought Parts are rebuilt as
   their dedicated block types and placed before `tool_use`, **but only in
-  assistant messages**. Under any other role they are dropped.
-- **Why drop under user role:** Anthropic returns 400 if thinking/redacted
-  blocks appear outside assistant messages. ADK's contents processor rewrites
+  assistant messages when a valid signature is present**. If an assistant
+  thought Part has text but no signature (e.g. signature stripped by context hygiene
+  or thought created by a different model vendor during model switching), it is
+  emitted as plain text rather than an invalid thinking block. Under any other role,
+  thought Parts are dropped.
+- **Why drop under user role / require signature:** Anthropic returns 400 if thinking/redacted
+  blocks appear outside assistant messages or if a thinking block lacks a valid cryptographic
+  signature. ADK's contents processor rewrites
   foreign-agent events as user-role "For context:" content and passes non-text
   parts through verbatim; those foreign reasoning signatures are useless (and
   illegal) here, so we drop them rather than let the API bounce the request.
+  Likewise, echoing a thinking block with an empty signature causes Anthropic to
+  reject the request (400 Bad Request); emitting text-bearing thought parts without
+  signatures as plain text preserves context while keeping the wire request valid.
   This is a *wire-schema* rule (where blocks are legal), not history policy;
   app-level stale-thought hygiene stays in the consumer.
 

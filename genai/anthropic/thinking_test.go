@@ -244,3 +244,54 @@ func TestConvertContentToMessage_DropsThoughtPartsInUserRole(t *testing.T) {
 		t.Fatalf("thought-only user content should produce no message, got %+v", msg)
 	}
 }
+
+// Thought parts in assistant role without a signature (e.g. stripped signatures, or
+// thoughts from a different model vendor) must be emitted as plain text blocks,
+// NOT as thinking blocks with an empty signature (which Anthropic rejects with HTTP 400).
+func TestConvertContentToMessage_EmitsPlaintextForAssistantThoughtWithoutSignature(t *testing.T) {
+	m := &Model{modelName: "claude-opus-4-8"}
+
+	msg, err := m.convertContentToMessage(&genai.Content{
+		Role: "model",
+		Parts: []*genai.Part{
+			{Text: "thought text without signature", Thought: true},
+			{Text: "thought text with signature", Thought: true, ThoughtSignature: []byte("sig-valid")},
+			{Text: "regular response text"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("convertContentToMessage: %v", err)
+	}
+	if msg == nil {
+		t.Fatal("expected message to be non-nil")
+	}
+	if len(msg.Content) != 3 {
+		t.Fatalf("expected 3 blocks, got %d", len(msg.Content))
+	}
+
+	// Block 0: thought without signature -> plain text block
+	if msg.Content[0].OfText == nil {
+		t.Errorf("block 0: expected plain text block for thought without signature, got %+v", msg.Content[0])
+	} else if msg.Content[0].OfText.Text != "thought text without signature" {
+		t.Errorf("block 0: text = %q, want %q", msg.Content[0].OfText.Text, "thought text without signature")
+	}
+
+	// Block 1: thought with signature -> thinking block
+	if msg.Content[1].OfThinking == nil {
+		t.Errorf("block 1: expected thinking block for thought with signature, got %+v", msg.Content[1])
+	} else {
+		if msg.Content[1].OfThinking.Thinking != "thought text with signature" {
+			t.Errorf("block 1: thinking = %q, want %q", msg.Content[1].OfThinking.Thinking, "thought text with signature")
+		}
+		if msg.Content[1].OfThinking.Signature != "sig-valid" {
+			t.Errorf("block 1: signature = %q, want %q", msg.Content[1].OfThinking.Signature, "sig-valid")
+		}
+	}
+
+	// Block 2: regular response text -> plain text block
+	if msg.Content[2].OfText == nil {
+		t.Errorf("block 2: expected plain text block for response text, got %+v", msg.Content[2])
+	} else if msg.Content[2].OfText.Text != "regular response text" {
+		t.Errorf("block 2: text = %q, want %q", msg.Content[2].OfText.Text, "regular response text")
+	}
+}
