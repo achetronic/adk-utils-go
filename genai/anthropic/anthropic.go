@@ -522,6 +522,12 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 		}
 
 		if part.FunctionCall != nil {
+			// Skip ADK internal framework parts (HITL confirmation
+			// protocol): they are not tools the model declared, and
+			// replaying them breaks tool_use/tool_result pairing.
+			if common.IsADKInternalCall(part.FunctionCall.Name) {
+				continue
+			}
 			input, err := common.MarshalToolPayload(part.FunctionCall.Args)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function call args: %w", err)
@@ -536,6 +542,9 @@ func (m *Model) convertContentToMessage(content *genai.Content) (*anthropic.Mess
 		}
 
 		if part.FunctionResponse != nil {
+			if common.IsADKInternalCall(part.FunctionResponse.Name) {
+				continue
+			}
 			responseJSON, err := common.MarshalToolPayload(part.FunctionResponse.Response)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)

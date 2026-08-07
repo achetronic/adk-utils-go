@@ -44,3 +44,25 @@ func TestMarshalToolPayload(t *testing.T) {
 		})
 	}
 }
+
+// ADK internal protocol names must be recognised so adapters can drop them;
+// anything model-declared must pass through untouched.
+func TestIsADKInternalCall(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"adk_request_confirmation", true},
+		{"get_weather", false},
+		{"adk_request_confirmation_extra", false},
+		{"", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsADKInternalCall(c.name); got != c.want {
+				t.Errorf("IsADKInternalCall(%q) = %v, want %v", c.name, got, c.want)
+			}
+		})
+	}
+}
