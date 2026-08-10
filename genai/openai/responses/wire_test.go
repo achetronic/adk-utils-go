@@ -1,14 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
 // SPDX-License-Identifier: Apache-2.0
 
-// Copyright 2025 achetronic
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-
 package responses
 
 import (
@@ -756,5 +748,71 @@ func TestWireBody_OrphanOutputDropped(t *testing.T) {
 	item, _ := input[0].(map[string]any)
 	if item["type"] == "function_call_output" {
 		t.Errorf("input[0] = %v, want the orphan output dropped", item)
+	}
+}
+
+// Some gateways close the stream after the last delta without sending any
+// terminal event. The final turn must still be synthesized from the
+// accumulated deltas, or ADK raises "last event is not final" and the
+// assistant turn is lost from history.
+func TestWireBody_StreamNoTerminalEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: response.output_text.delta\n")
+		io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"hel","sequence_number":1}`+"\n\n")
+		io.WriteString(w, "event: response.output_text.delta\n")
+		io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"lo","sequence_number":2}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "gpt-test"})
+
+	var final *model.LLMResponse
+	req := &model.LLMRequest{Contents: []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+	}}
+	for resp, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			t.Fatalf("GenerateContent: %v", err)
+		}
+		if !resp.Partial {
+			final = resp
+		}
+	}
+	if final == nil {
+		t.Fatalf("no final (non-partial) response was synthesized")
+	}
+	if got := extractText(final.Content); got != "hello" {
+		t.Errorf("final text = %q, want the accumulated deltas %q", got, "hello")
+	}
+}
+
+// Sampling settings must land on the wire: a config dropped between the ADK
+// request and the SDK params would be invisible to callers until the model
+// behaves differently. Values are float32-exact so the assertion is not at
+// the mercy of float32-to-float64 widening.
+func TestWireBody_GenerationConfig(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+		},
+		Config: &genai.GenerateContentConfig{
+			Temperature:     genai.Ptr[float32](0.5),
+			TopP:            genai.Ptr[float32](0.25),
+			MaxOutputTokens: 128,
+		},
+	}
+
+	body := captureBody(t, req)
+
+	if body["temperature"] != 0.5 {
+		t.Errorf("temperature = %v, want 0.5", body["temperature"])
+	}
+	if body["top_p"] != 0.25 {
+		t.Errorf("top_p = %v, want 0.25", body["top_p"])
+	}
+	if body["max_output_tokens"] != float64(128) {
+		t.Errorf("max_output_tokens = %v, want 128", body["max_output_tokens"])
 	}
 }

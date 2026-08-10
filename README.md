@@ -189,7 +189,9 @@ agent, _ := llmagent.New(llmagent.Config{
 })
 ```
 
-**Which OpenAI adapter should I use?** Pick whichever fits your needs:
+### Choosing between the OpenAI adapters
+
+Pick whichever fits your needs:
 
 | Adapter | When to use |
 |---|---|

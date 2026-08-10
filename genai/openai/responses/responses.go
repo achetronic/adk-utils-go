@@ -1,20 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
 // SPDX-License-Identifier: Apache-2.0
 
-// Copyright 2025 achetronic
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 // Package responses provides an OpenAI Responses API (/v1/responses)
 // implementation for the ADK.
 //
@@ -616,7 +602,9 @@ func (m *Model) buildResponseParams(req *model.LLMRequest) (responses.ResponseNe
 	return params, nil
 }
 
-// applyGenerationConfig applies optional generation settings to the request params.
+// applyGenerationConfig applies optional generation settings to the request
+// params. StopSequences is ignored: the Responses API has no stop parameter,
+// so unlike the Chat Completions adapter there is nothing to map it to.
 func applyGenerationConfig(params *responses.ResponseNewParams, cfg *genai.GenerateContentConfig) error {
 	if cfg.Temperature != nil {
 		params.Temperature = param.NewOpt(float64(*cfg.Temperature))
@@ -927,23 +915,12 @@ func convertContentToInputItems(content *genai.Content, origin string, dangling 
 			))
 
 		case part.Thought:
-			// Reasoning items carrying encrypted content are replayed so the
-			// model keeps its chain of thought across turns; reasoning models
-			// require the reasoning item preceding a function_call to be
-			// present in the input. Skipped instead of replayed when:
-			//   - the content is not an assistant turn: in multi-agent
-			//     histories another agent's output (thoughts included) shows
-			//     up under other roles, where a reasoning item is invalid;
-			//   - there is no encrypted content (e.g. gateways that ignore
-			//     the include parameter): bare IDs only resolve in the
-			//     originating response and replaying them is a 400;
-			//   - the origin does not match: encrypted content is bound to
-			//     the provider/API key/model that produced it, and replaying
-			//     it elsewhere is a 400 invalid_encrypted_content;
-			//   - no item from the same turn follows: the API rejects
-			//     dangling reasoning items.
-			// Skipping degrades gracefully: the model re-derives its
-			// reasoning for the turn instead of the request failing.
+			// Reasoning items with encrypted content are replayed so the
+			// model keeps its chain of thought across turns, as reasoning
+			// models require. Items the API would reject are skipped instead
+			// (non-assistant turns, missing encrypted content, a foreign
+			// origin, no same-turn item following), so the model re-derives
+			// its reasoning rather than the request failing with a 400.
 			if role != responses.EasyInputMessageRoleAssistant {
 				continue
 			}
