@@ -816,3 +816,114 @@ func TestWireBody_GenerationConfig(t *testing.T) {
 		t.Errorf("max_output_tokens = %v, want 128", body["max_output_tokens"])
 	}
 }
+
+// A multi-name allowlist must reach the wire as a filtered tool list plus
+// tool_choice required: "required" alone leaves every declared tool
+// callable, which defeats the allowlist.
+func TestWireBody_MultiNameAllowlistFiltersTools(t *testing.T) {
+	tool := func(name string) *genai.Tool {
+		return &genai.Tool{FunctionDeclarations: []*genai.FunctionDeclaration{{
+			Name:                 name,
+			ParametersJsonSchema: map[string]any{"type": "object"},
+		}}}
+	}
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+		},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{tool("search"), tool("delete"), tool("rename")},
+			ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{
+				Mode:                 genai.FunctionCallingConfigModeAny,
+				AllowedFunctionNames: []string{"search", "rename"},
+			}},
+		},
+	}
+
+	body := captureBody(t, req)
+
+	if body["tool_choice"] != "required" {
+		t.Errorf("tool_choice = %v, want required", body["tool_choice"])
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools on the wire = %d, want the 2 allowed: %v", len(tools), tools)
+	}
+	names := map[string]bool{}
+	for _, raw := range tools {
+		toolMap, _ := raw.(map[string]any)
+		names[toolMap["name"].(string)] = true
+	}
+	if !names["search"] || !names["rename"] || names["delete"] {
+		t.Errorf("tool names on the wire = %v, want search and rename only", names)
+	}
+}
+
+// Assistant history carrying a phase but no message ID must replay as a
+// plain input message with the phase kept: OutputMessage requires an id,
+// so building one with an empty id is a request the API rejects.
+func TestWireBody_PhaseOnlyReplaysAsInputMessage(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+			{Role: "model", Parts: []*genai.Part{{
+				Text:         "thinking out loud",
+				PartMetadata: map[string]any{"phase": "commentary"},
+			}}},
+		},
+	}
+
+	body := captureBody(t, req)
+
+	input, _ := body["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("input items = %d, want 2: %v", len(input), input)
+	}
+	msg, _ := input[1].(map[string]any)
+	if msg["type"] != "message" || msg["role"] != "assistant" {
+		t.Fatalf("input[1] = %v, want an assistant message", msg)
+	}
+	if _, hasID := msg["id"]; hasID {
+		t.Errorf("input[1] = %v, want no id field (OutputMessage requires a real one)", msg)
+	}
+	if _, isString := msg["content"].(string); !isString {
+		t.Errorf("content = %v, want the plain input message string form", msg["content"])
+	}
+	if msg["phase"] != "commentary" {
+		t.Errorf("phase = %v, want commentary kept on the input message", msg["phase"])
+	}
+}
+
+// A stream that answers 200 and closes without delivering any event must
+// surface an error instead of ending as a silent zero-event iteration:
+// overloaded gateways answer exactly this shape.
+func TestWireBody_StreamEmptyIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+	}))
+	defer srv.Close()
+
+	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "gpt-test"})
+
+	req := &model.LLMRequest{Contents: []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+	}}
+	var streamErr error
+	var responseCount int
+	for resp, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			streamErr = err
+			break
+		}
+		if resp != nil {
+			responseCount++
+		}
+	}
+	if responseCount != 0 {
+		t.Errorf("responses yielded = %d, want none from an empty stream", responseCount)
+	}
+	if !errors.Is(streamErr, ErrNoConsumableOutput) {
+		t.Errorf("err = %v, want ErrNoConsumableOutput", streamErr)
+	}
+}

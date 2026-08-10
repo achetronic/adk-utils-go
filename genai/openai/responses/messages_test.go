@@ -156,34 +156,68 @@ func TestConvertContentToInputItems(t *testing.T) {
 	}
 }
 
-// Model output with phase metadata must use ResponseOutputMessageParam
-// to preserve the phase field across turns. Without this, GPT-5.3-Codex+
-// models suffer performance degradation.
+// Phase must survive the replay either way, keyed on the message ID:
+// with one, the content replays as an OutputMessage carrying its full
+// identity; without one it must fall back to a plain input message (an
+// OutputMessage with an empty id is a request the API rejects), which
+// carries phase itself. Dropping phase degrades GPT-5.3-Codex+ models.
 func TestConvertContentToInputItems_PhasePreserved(t *testing.T) {
-	content := &genai.Content{
-		Role: "model",
-		Parts: []*genai.Part{
-			{
-				Text:         "thinking...",
-				PartMetadata: map[string]any{"phase": "commentary"},
+	t.Run("with message ID", func(t *testing.T) {
+		content := &genai.Content{
+			Role: "model",
+			Parts: []*genai.Part{
+				{
+					Text:         "thinking...",
+					PartMetadata: map[string]any{"phase": "commentary", "message_id": "msg_1"},
+				},
 			},
-		},
-	}
+		}
 
-	items, err := convertContentToInputItems(content, "test-origin", nil)
-	if err != nil {
-		t.Fatalf("error: %v", err)
-	}
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(items))
-	}
-	msg := items[0].OfOutputMessage
-	if msg == nil {
-		t.Fatalf("expected OutputMessage for phase-carrying content, got %+v", items[0])
-	}
-	if msg.Phase != "commentary" {
-		t.Errorf("Phase = %q, want commentary", msg.Phase)
-	}
+		items, err := convertContentToInputItems(content, "test-origin", nil)
+		if err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("expected 1 item, got %d", len(items))
+		}
+		msg := items[0].OfOutputMessage
+		if msg == nil {
+			t.Fatalf("expected OutputMessage for identity-carrying content, got %+v", items[0])
+		}
+		if msg.ID != "msg_1" {
+			t.Errorf("ID = %q, want msg_1", msg.ID)
+		}
+		if msg.Phase != "commentary" {
+			t.Errorf("Phase = %q, want commentary", msg.Phase)
+		}
+	})
+
+	t.Run("phase only", func(t *testing.T) {
+		content := &genai.Content{
+			Role: "model",
+			Parts: []*genai.Part{
+				{
+					Text:         "thinking...",
+					PartMetadata: map[string]any{"phase": "commentary"},
+				},
+			},
+		}
+
+		items, err := convertContentToInputItems(content, "test-origin", nil)
+		if err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("expected 1 item, got %d", len(items))
+		}
+		msg := items[0].OfMessage
+		if msg == nil {
+			t.Fatalf("expected a plain input message without an id, got %+v", items[0])
+		}
+		if msg.Phase != "commentary" {
+			t.Errorf("Phase = %q, want commentary kept on the input message", msg.Phase)
+		}
+	})
 }
 
 // Thought parts without encrypted content reference server-side IDs that only
