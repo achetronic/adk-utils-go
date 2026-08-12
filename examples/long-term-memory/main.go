@@ -31,7 +31,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/genai"
 
-	genaiopenai "github.com/achetronic/adk-utils-go/genai/openai"
+	"github.com/achetronic/adk-utils-go/genai/openai/completions"
 	memorypostgres "github.com/achetronic/adk-utils-go/memory/postgres"
 	memorytools "github.com/achetronic/adk-utils-go/tools/memory"
 )
@@ -152,8 +152,8 @@ func runAgent(ctx context.Context, runnr *runner.Runner, sessionID string, input
 	return responseText
 }
 
-func getOpenAIModel() *genaiopenai.Model {
-	return genaiopenai.New(genaiopenai.Config{
+func getOpenAIModel() *completions.Model {
+	return completions.New(completions.Config{
 		APIKey:    os.Getenv("OPENAI_API_KEY"),
 		BaseURL:   getEnvOrDefault("OPENAI_BASE_URL", "http://localhost:11434/v1"),
 		ModelName: getEnvOrDefault("MODEL_NAME", "qwen3:8b"),

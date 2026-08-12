@@ -1,6 +1,6 @@
 # DECISIONS.md
 
-Design decisions for the `genai/*` LLM adapters (`genai/openai` and
+Design decisions for the `genai/*` LLM adapters (`genai/openai/completions` and
 `genai/anthropic`). Each entry records *what* was decided and *why*, so the next
 person (or agent) doesn't re-litigate it or "fix" it back into a bug.
 
@@ -168,7 +168,7 @@ those.
 
 ---
 
-## OpenAI adapter (`genai/openai`)
+## OpenAI adapter (`genai/openai/completions`)
 
 Targets: OpenAI proper + OpenAI-compatible servers (Ollama, vLLM, LocalAI,
 LiteLLM, ...). Skews towards portability, not just the official endpoint.
@@ -279,190 +279,30 @@ inclusive and unchanged.
 
 ---
 
-### O10 - Provider divergences plug in through a Dialect of small capabilities
+### O10 - Provider divergences plug into the adapter through a Dialect
 
-The adapter knows no provider-specific wire shape by itself. A `Dialect`,
-plugged through `Config.Dialect`, opts into the areas it needs by
-implementing capability interfaces; a nil dialect keeps the adapter
-OpenAI-pure.
+The adapter speaks documented OpenAI wire only. Any divergence of a
+compatible provider plugs through `Config.Dialect` as a set of opt-in
+capability interfaces: a dialect implements only the seams its provider
+needs, and nil keeps the adapter OpenAI-pure, which is what OpenAI's own
+API requires. The capabilities and where the pipeline touches them are
+documented on the `Dialect` type.
 
-- **Why capabilities, not one big interface:** the divergence inventory of
-  the compatible providers (DeepSeek, Kimi, Mistral, OpenRouter, vLLM, xAI,
-  Ollama) clusters into seven areas, and a provider touches one to three of
-  them, never all. One fat interface would force every dialect to
-  stub four areas it does not use; five small interfaces let a dialect
-  implement only what it needs, and let the adapter grow a sixth area later
-  without touching the existing dialects.
-- **The five capability interfaces:**
-  - `ToolIDNormalizer`: the tool_call_id wire shape. OpenAI allows up to 40
-    characters from [a-zA-Z0-9_-] (the built-in O1 rule); Mistral rejects
-    anything that is not exactly 9 alphanumeric characters. The dialect owns
-    the shape; the adapter keeps the wire-to-original mapping so ADK keeps
-    seeing its own IDs on both the tool_calls and the tool messages that
-    refer back to them.
-  - `ParamsAdjuster`: a last pass over the outgoing request params, fired
-    after the adapter finishes building them and merging ExtraBody, with the
-    stream flag in hand. For providers that reject combinations the OpenAI
-    schema accepts: xAI's reasoning models refuse stop sequences and the
-    penalty knobs, and some gateways refuse stream_options.
-  - `ReasoningDecoder`: the reasoning fields the schema does not define, on
-    ingest (O12 covers the streaming half).
-  - `ReasoningEncoder`: the same on egress, as assistant-message extra
-    fields in the native egress mode (O11).
-  - `UsageDecoder`: usage buckets reported outside the standard object,
-    folded into the metadata the adapter already built. DeepSeek puts
-    prompt_cache_hit_tokens at the usage root, not in
-    prompt_tokens_details.
-  - `ThinkingMapper`: the provider-native reasoning-effort knob. Implemented,
-    the dialect owns the mapping from genai's thinking level entirely; not
-    implemented means the typed OpenAI field reasoning_effort is used.
-    OpenRouter's effort lives in a reasoning object at the request root and
-    vLLM and Qwen use enable_thinking, so the typed field cannot serve them.
-    The dialect's knob wins over a reasoning key a caller set in ExtraBody:
-    the effort is the dialect's area.
-  - `EgressPolicy`: the replay shapes the provider tolerates. Resolved once in
-    `New`: a requested mode the dialect vetoes is replaced by an accepted one
-    and logged, so the caller still picks any tolerated shape and nothing the
-    provider rejects reaches the wire. The DeepSeek dialect pins the replay
-    to native, because thinking mode rejects a tool-call history whose
-    assistant turns lack the reasoning key.
-- **Pipeline touch points, in request order:** tool IDs are normalised while
-  the messages are built; the thinking level is applied in
-  `applyGenerationConfig`; `ParamsAdjuster` fires last in
-  `buildChatCompletionParams`, after ExtraBody, so it sees the exact body
-  the wire gets; ingest decodes in `convertResponse` and `generateStream`;
-  usage decodes in `decodeUsageMetadata`, only when the response reported
-  tokens; egress encodes in `convertContentToMessages`, in the native mode
-  only. The order is documented on the `Dialect` type itself.
-- **Capabilities are asserted once in `New`** and held as fields, so the
-  conversion path is a nil check, not a type assertion per request.
-- **What the adapter still owns:** the pipeline rules a dialect cannot
-  change. Thought Parts never reach the reply text; reasoning attaches to
-  assistant turns only; a reasoning-only turn sends no message; and
-  `Config.ReasoningEgress` is the policy applied on top of whatever a
-  dialect encodes. A native-mode dialect without an encoder degrades to
-  think tags rather than dropping, so a replayed session keeps its trace.
-- **Why a Name() method:** the base `Dialect` interface is otherwise empty;
-  `Name()` gives logs and errors something to point at without forcing any
-  behaviour.
-- **Tests:** `dialect_capability_test.go` pins each capability with a
-  dialect-shaped test double (Mistral-style 9-char IDs correlating across
-  the tool pair on the wire, an xAI-style adjuster stripping stop, a
-  DeepSeek-style usage fold); `wire_test.go` pins the nil-dialect default:
-  no provider fields on the wire, stray thoughts fold into think tags;
-  `reasoning_test.go` pins the veto: the DeepSeek dialect forces native
-  over think tags and omit, and omit stands against OpenRouter.
+**Why:** without this seam the adapter degenerates into provider
+special-cases keyed by BaseURL. Capabilities keep the core generic for any
+compatible provider, and new divergence areas are added without touching
+existing dialects.
 
-### O11 - Three dialects ship: `TextDialect` for plain text, `DeepSeek` for the strict replay, `OpenRouter` for `reasoning_details`
+### O11 - The Chat Completions adapter lives in `genai/openai/completions`
 
-**TextDialect** carries reasoning as a single plain-text field on the
-assistant message. Read and write are split on purpose: what varies between
-providers is the name they *emit*, while they all accept `reasoning_content`
-back. `ReadFields` (default `["reasoning_content", "reasoning"]`, covering
-DeepSeek, Kimi, Mistral, OpenRouter's text shape and newer vLLM) is an
-ordered probe list for ingest; the first present non-empty string wins.
-`WriteField` (default `reasoning_content`) is the field the reasoning goes
-out in. Both are knobs on the struct, so a provider with its own field
-names plugs in with no new code.
+The adapter moved down one level and was renamed from `openai` to
+`completions`.
 
-**DeepSeek** layers a replay veto on the text dialect: it embeds
-`TextDialect`, so the read and write fields are the same, and implements
-`EgressPolicy` pinning the replay to native. DeepSeek in thinking mode
-rejects a tool-call history whose assistant turns lack the reasoning key
-with a 400, so think tags and omit are refused at construction and the
-override is logged.
-
-**OpenRouter** carries OpenRouter's structured shape: a `reasoning_details`
-array of typed blocks (`reasoning.text` with an optional signature,
-`reasoning.summary`, `reasoning.encrypted`) alongside a plain-text copy.
-The encrypted variant is what models that do not expose readable reasoning
-hand back, and the case the plain-text field cannot express at all.
-
-- **Storage:** one thought Part per block, in wire order, with the block
-  kept verbatim in `Part.PartMetadata` under the exported
-  `ReasoningDetailMetadataKey` (`openai.reasoning_detail`). `Part.Text`
-  mirrors the readable text so consumers filtering on `Thought` still see
-  reasoning; an encrypted block yields a Part with empty `Text` and
-  metadata only, the same convention as A3's redacted thinking block. One
-  Part per block keeps the required order implicit in Part order.
-- **Blocks are opaque:** decoded as `map[string]any` and never re-typed,
-  reordered, filtered or rewritten, nulls included. OpenRouter requires the
-  replayed sequence to match what the model produced, the block schema is
-  open, and the documented `format` list keeps growing, so an unknown block
-  type or vendor key still round-trips.
-- **No gating knob:** the dialect is all-or-nothing at construction. A
-  backend that never sends the array never has one replayed, because the
-  encoder only writes the array when a Part actually carries a block.
-- **Native mode only for the array:** a block is replayed as an array
-  element only in native mode, the one shape with a field to hold it. In
-  think-tag or omit mode its readable text degrades into the plain-text
-  shape (think tags) or drops (omit); an encrypted block has no text and is
-  lost there, the unavoidable cost of a backend that cannot take the array.
-- **Blocks beat the plain-text field:** when both arrive they describe the
-  same reasoning and the blocks carry strictly more, so the string is
-  skipped on ingest. On egress a Part feeds either the array or the string,
-  never both; a turn mixing blocked and plain thoughts sends both fields,
-  each fed by its own Parts.
-- **Tests:** `dialect_reasoning_test.go` covers decode (blocks, text
-  fallback, malformed array), encode (verbatim blocks, mixed turns, empty
-  input) and the accumulators; `reasoning_test.go` covers the byte-identical
-  round trip and the degradation outside native mode.
-
-### O12 - Streamed reasoning is accumulated by the dialect, not read off the SDK accumulator
-
-`openai-go`'s `ChatCompletionAccumulator` merges chunks field by field and
-keeps **no raw JSON** on the message it aggregates (`accumulateDelta` states
-that it ignores the JSON field). Every reasoning field is non-standard and
-lives only in raw JSON, so `acc.Choices[0].Message.RawJSON()` is the empty
-string at the end of a real stream.
-
-- **Consequence:** probing that aggregate silently yields nothing, so a
-  streamed turn's terminal response would carry no thought Part at all. The
-  terminal response is what becomes history, so streamed reasoning would be
-  lost even though the partial responses carried it.
-- **Decision:** `generateStream` asks the dialect's decoder for a fresh
-  accumulator via `NewAccumulator`, feeds it every delta's decoded Parts,
-  and passes it to `buildStreamFinalResponse`, which renders `Parts()`
-  ahead of the answer. Without a reasoning decoder there is no accumulator
-  and nothing is decoded. The merge semantics belong to the dialect:
-  TextDialect concatenates the texts; OpenRouter merges `reasoning_details`
-  blocks by their reported `index` (`text`, `summary` and `data`
-  concatenate; everything else takes the newest non-empty value, so a
-  signature arriving late is kept and a null never erases one), and blocks
-  without an index append in arrival order.
-- **Do not "simplify" this back:** reading reasoning off the SDK aggregate
-  looks equivalent and is not. A test that builds an accumulator with
-  `json.Unmarshal` of a whole response passes while the live path is broken,
-  because unmarshalling populates raw JSON a stream never has. That is
-  exactly how this gap went unnoticed.
-- **Tests:** `wire_test.go` drives real chunks through the public streaming
-  path against a fake SSE server and asserts the terminal response carries
-  the concatenated reasoning, and that the nil-dialect default surfaces no
-  thought Parts even when the stream sends a reasoning field.
-
-### O13 - Provider extensions at the request root via `ExtraBody`
-
-OpenAI-compatible providers add top-level request fields that Chat Completions
-does not define: OpenRouter alone has `reasoning`, `provider`, `transforms` and
-`plugins`. `Config.ExtraBody map[string]any` is merged into the root of every
-request body through the same `SetExtraFields` escape hatch the reasoning fields
-use, on the streaming and non-streaming paths alike.
-
-- **Why config, not per request:** these describe the endpoint a Model points
-  at, decided once at construction like `BaseURL`. ADK's
-  `GenerateContentConfig` has no field to carry them, and adding typed options
-  per provider would drag the whole OpenRouter surface into this library.
-- **Why a map, not `[]option.RequestOption`:** exposing the SDK's option type
-  would leak `openai-go` types into `Config`, which otherwise uses only stdlib
-  types. A map keeps the public surface provider-agnostic.
-- **Collisions:** a key matching a field the adapter sets replaces it on the
-  wire, since extra fields win at marshal time. Documented as an extension
-  point rather than defended against: filtering keys would be its own surprise,
-  and the escape hatch is deliberate.
-- **Copied at construction:** `New` copies the caller's map, so a caller reusing
-  or mutating its own map cannot race with a request in flight, and Model state
-  stays read-only during conversion (D2).
-- **Tests:** `wire_test.go` covers a nested object landing at the body root.
+**Why:** a Responses API adapter joins the library. Two wire protocols
+cannot share a package, and sibling packages under a common parent
+(`openai/completions`, `openai/responses`) keep the import paths honest.
+No compatibility layer for the old path: consumers moved in the same
+change.
 
 ---
 

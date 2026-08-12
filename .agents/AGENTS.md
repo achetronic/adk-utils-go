@@ -69,7 +69,8 @@ go mod verify
 adk-utils-go/
 ├── genai/
 │   ├── openai/
-│   │   └── openai.go            # OpenAI/Ollama-compatible LLM adapter
+│   │   └── completions/         # OpenAI/Ollama-compatible Chat Completions adapter
+│   │       └── openai.go        # (provider divergences plug in through dialects)
 │   └── anthropic/
 │       └── anthropic.go         # Anthropic Claude LLM adapter
 ├── session/
@@ -123,7 +124,7 @@ adk-utils-go/
 | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `genai/common`        | Helpers shared by the LLM adapters so cross-provider wire rules are implemented once (e.g. `MarshalToolPayload`)  |
 | `genai/anthropic`     | Anthropic Claude `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)          |
-| `genai/openai`        | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`; provider divergences plug in through a Dialect of capabilities, nil = OpenAI-pure, see DECISIONS O10-O12)  |
+| `genai/openai/completions`        | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`; provider divergences plug in through a Dialect of capabilities, nil = OpenAI-pure, see DECISIONS O10-O11)  |
 | `session/redis`       | Redis-backed implementation of `session.Service`                                                                  |
 | `memory/memorytypes`  | Shared types (`EntryWithID`) and interfaces (`MemoryService`, `ExtendedMemoryService`)                            |
 | `memory/postgres`     | PostgreSQL+pgvector implementation of `memory.Service` and `ExtendedMemoryService`                                |
@@ -382,7 +383,7 @@ AfterModelCallback:
 
 ## LLM Adapters: tool_choice Mapping
 
-Both `genai/openai` and `genai/anthropic` translate `genai.GenerateContentConfig.ToolConfig.FunctionCallingConfig` into the provider-native `tool_choice` field during `applyGenerationConfig` / `buildMessageParams`. ADK propagates `ToolConfig` through `basic_processor.go` (`req.Config = clone(state.GenerateContentConfig)`), so the field arrives untouched at the adapter.
+Both `genai/openai/completions` and `genai/anthropic` translate `genai.GenerateContentConfig.ToolConfig.FunctionCallingConfig` into the provider-native `tool_choice` field during `applyGenerationConfig` / `buildMessageParams`. ADK propagates `ToolConfig` through `basic_processor.go` (`req.Config = clone(state.GenerateContentConfig)`), so the field arrives untouched at the adapter.
 
 Without this translation, callers setting `Mode: ANY` on an LLM agent see the setting silently dropped: the typical symptom being models like Kimi K2 or certain Claude variants producing plain-text replies that hand-format tool calls as prose, stranding agentic loops that require a native function call.
 
@@ -409,6 +410,6 @@ A tool with no parameters (e.g. `exit_loop`) leaves `genai.FunctionCall.Args` ni
 
 Because this is a provider wire-schema rule, it lives in the adapters (consumers must not have to scrub their `genai.Content`):
 
-- `genai/openai` and `genai/anthropic` both route `FunctionCall.Args` and `FunctionResponse.Response` through `common.MarshalToolPayload` (in the `genai/common` package), which performs the `null`/empty -> `{}` normalisation once for both providers, propagates a genuine marshal error, and never mutates the input. Keeping it in one place is what guarantees tool_use and tool_result stay symmetric and the two adapters stay interchangeable (D5).
+- `genai/openai/completions` and `genai/anthropic` both route `FunctionCall.Args` and `FunctionResponse.Response` through `common.MarshalToolPayload` (in the `genai/common` package), which performs the `null`/empty -> `{}` normalisation once for both providers, propagates a genuine marshal error, and never mutates the input. Keeping it in one place is what guarantees tool_use and tool_result stay symmetric and the two adapters stay interchangeable (D5).
 
 Coverage: `genai/common/payload_test.go` pins the helper's unit contract; each adapter's `tool_payload_test.go` pins the integration, including a canary that fails if a future change "fixes" the nil payload by mutating the shared input in place. Full rationale and the per-provider decision list are in [DECISIONS.md](./DECISIONS.md) (decision D1).

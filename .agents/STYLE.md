@@ -46,7 +46,7 @@ in any of the three.
 
 3. **Name components in words, not paths.** Write "the OpenAI adapter",
    "the Langfuse plugin", "the Redis session service". Do not write
-   `genai/openai` or `plugin/langfuse` in prose aimed at a reader;
+   `genai/openai/completions` or `plugin/langfuse` in prose aimed at a reader;
    paths are for technical context (file headers, test names).
 
 4. **Fail-loud over silent, and say so when relevant.** If a function

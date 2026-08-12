@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
 // SPDX-License-Identifier: Apache-2.0
 
-// Package openai provides an OpenAI-compatible LLM implementation for the ADK.
+// Package completions provides an OpenAI-compatible LLM implementation for the ADK.
 // It supports both native OpenAI API and compatible providers like Ollama.
-package openai
+package completions
 
 import (
 	"context"

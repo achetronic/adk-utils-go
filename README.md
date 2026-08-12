@@ -47,9 +47,9 @@ go get github.com/achetronic/adk-utils-go
 Works with OpenAI API and any OpenAI-compatible API (Ollama, OpenRouter, Azure OpenAI, etc.):
 
 ```go
-import genaiopenai "github.com/achetronic/adk-utils-go/genai/openai"
+import "github.com/achetronic/adk-utils-go/genai/openai/completions"
 
-llmModel := genaiopenai.New(genaiopenai.Config{
+llmModel := completions.New(completions.Config{
     APIKey:    os.Getenv("OPENAI_API_KEY"),
     BaseURL:   "http://localhost:11434/v1", // For Ollama
     ModelName: "gpt-4o",                     // Or "qwen3:8b" for Ollama
@@ -72,25 +72,25 @@ tool_call_id shape, usage buckets outside the standard object, and a last
 pass over the request params.
 
 ```go
-// Plain-text reasoning (Kimi, Mistral, vLLM, ...)
-llmModel := genaiopenai.New(genaiopenai.Config{
+// Plain-text reasoning (Kimi, Mistral, vLLM, llama.cpp, ...)
+llmModel := completions.New(completions.Config{
     BaseURL:   "http://localhost:11434/v1",
     ModelName: "qwen3:8b",
-    Dialect:   genaiopenai.NewTextDialect(),
+    Dialect:   completions.NewTextDialect(),
 })
 
 // DeepSeek: the same fields, plus a replay rule the provider enforces
-llmModel := genaiopenai.New(genaiopenai.Config{
+llmModel := completions.New(completions.Config{
     BaseURL:   "https://api.deepseek.com/v1",
     ModelName: "deepseek-reasoner",
-    Dialect:   genaiopenai.DeepSeek,
+    Dialect:   completions.DeepSeek,
 })
 
 // OpenRouter's structured reasoning_details (signatures, encrypted blocks)
-llmModel := genaiopenai.New(genaiopenai.Config{
+llmModel := completions.New(completions.Config{
     BaseURL:   "https://openrouter.ai/api/v1",
     ModelName: "anthropic/claude-sonnet-4.6",
-    Dialect:   genaiopenai.OpenRouter,
+    Dialect:   completions.OpenRouter,
 })
 ```
 
@@ -101,10 +101,10 @@ a shape narrows the knob to the accepted ones and logs the override, so an
 invalid combination never reaches the wire:
 
 ```go
-llmModel := genaiopenai.New(genaiopenai.Config{
+llmModel := completions.New(completions.Config{
     ModelName:       "qwen3:8b",
-    Dialect:         genaiopenai.NewTextDialect(),
-    ReasoningEgress: genaiopenai.ReasoningEgressThinkTags,
+    Dialect:         completions.NewTextDialect(),
+    ReasoningEgress: completions.ReasoningEgressThinkTags,
 })
 ```
 
@@ -112,10 +112,10 @@ OpenRouter's request-side reasoning controls (effort, max tokens) are not
 typed fields; send them through `ExtraBody`:
 
 ```go
-llmModel := genaiopenai.New(genaiopenai.Config{
+llmModel := completions.New(completions.Config{
     BaseURL:   "https://openrouter.ai/api/v1",
     ModelName: "anthropic/claude-sonnet-4.6",
-    Dialect:   genaiopenai.OpenRouter,
+    Dialect:   completions.OpenRouter,
     ExtraBody: map[string]any{
         "reasoning": map[string]any{"effort": "high"},
     },
