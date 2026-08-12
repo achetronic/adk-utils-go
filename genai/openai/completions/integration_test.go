@@ -13,7 +13,7 @@
 //
 // Run: go test -tags=integration ./genai/openai/...
 // With a real call: OPENAI_API_KEY=sk-... go test -tags=integration ./genai/openai/...
-package openai
+package completions
 
 import (
 	"bytes"
@@ -37,7 +37,7 @@ import (
 func newSchemaRouter(t *testing.T) routers.Router {
 	t.Helper()
 	loader := openapi3.NewLoader()
-	doc, err := loader.LoadFromFile("../testdata/openapi/openai.yaml")
+	doc, err := loader.LoadFromFile("../../testdata/openapi/openai.yaml")
 	if err != nil {
 		t.Fatalf("load spec: %v", err)
 	}

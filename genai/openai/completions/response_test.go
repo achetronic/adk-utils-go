@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
 // SPDX-License-Identifier: Apache-2.0
 
-package openai
+package completions
 
 import (
 	"encoding/json"
@@ -131,7 +131,7 @@ func TestConvertResponse(t *testing.T) {
 func TestBuildStreamFinalResponse(t *testing.T) {
 	t.Run("empty accumulator returns an empty but valid response", func(t *testing.T) {
 		m := newModelForTest()
-		got := m.buildStreamFinalResponse(&openai.ChatCompletionAccumulator{})
+		got := m.buildStreamFinalResponse(&openai.ChatCompletionAccumulator{}, nil)
 		if got == nil {
 			t.Fatalf("expected non-nil response")
 		}
@@ -166,7 +166,7 @@ func TestBuildStreamFinalResponse(t *testing.T) {
 				Usage: openai.CompletionUsage{TotalTokens: 9},
 			},
 		}
-		got := m.buildStreamFinalResponse(acc)
+		got := m.buildStreamFinalResponse(acc, nil)
 		if got.FinishReason != genai.FinishReasonStop {
 			t.Errorf("FinishReason = %v, want Stop", got.FinishReason)
 		}
@@ -249,18 +249,13 @@ func TestConvertThinkingLevel(t *testing.T) {
 	}
 }
 
-// extractReasoningContent reads the non-standard "reasoning_content" field
-// from the raw JSON envelope that openai-go preserves on every typed
-// response struct. The function exists because OpenAI-compatible providers
-// (Kimi K2.6, DeepSeek-R1, Qwen3-Thinking, etc.) extend the Chat Completions
-// schema with this field, and openai-go does NOT type it - it lives only in
-// JSON.raw / ExtraFields.
-//
-// The contract is: return the field value verbatim if present and non-empty,
-// "" otherwise. Malformed JSON must yield "" rather than an error because
-// callers cannot meaningfully react to it - at the response-conversion
-// layer, dropping a thought Part is the safe degradation.
-func TestExtractReasoningContent(t *testing.T) {
+// probeString is the raw-JSON probe TextCodec uses to find the plain-text
+// reasoning field: it returns the first configured field present as a
+// non-empty string, "" otherwise, and "" for an unparseable envelope. The
+// degradation is deliberate: at the response-conversion layer dropping a
+// thought Part is the safe outcome of a field the codec cannot read.
+func TestProbeString(t *testing.T) {
+	fields := []string{"reasoning_content", "reasoning"}
 	cases := []struct {
 		name string
 		raw  string
@@ -272,7 +267,7 @@ func TestExtractReasoningContent(t *testing.T) {
 			want: "",
 		},
 		{
-			name: "raw without reasoning_content returns empty",
+			name: "raw without a reasoning field returns empty",
 			raw:  `{"role":"assistant","content":"hello"}`,
 			want: "",
 		},
@@ -280,6 +275,16 @@ func TestExtractReasoningContent(t *testing.T) {
 			name: "raw with reasoning_content returns the value",
 			raw:  `{"role":"assistant","content":"hello","reasoning_content":"thinking step by step"}`,
 			want: "thinking step by step",
+		},
+		{
+			name: "raw with reasoning returns the value",
+			raw:  `{"role":"assistant","content":"hello","reasoning":"openrouter trace"}`,
+			want: "openrouter trace",
+		},
+		{
+			name: "first configured field wins over a later one",
+			raw:  `{"reasoning_content":"from content","reasoning":"from reasoning"}`,
+			want: "from content",
 		},
 		{
 			name: "raw with empty reasoning_content returns empty",
@@ -292,7 +297,7 @@ func TestExtractReasoningContent(t *testing.T) {
 			want: "",
 		},
 		{
-			name: "reasoning_content of wrong type (non-string) returns empty",
+			name: "reasoning field of wrong type (non-string) returns empty",
 			raw:  `{"reasoning_content":123}`,
 			want: "",
 		},
@@ -300,8 +305,8 @@ func TestExtractReasoningContent(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := extractReasoningContent(c.raw); got != c.want {
-				t.Errorf("extractReasoningContent(%q) = %q, want %q", c.raw, got, c.want)
+			if got := probeString(probeRawJSON(c.raw), fields); got != c.want {
+				t.Errorf("probeString(probeRawJSON(%q)) = %q, want %q", c.raw, got, c.want)
 			}
 		})
 	}
@@ -341,7 +346,7 @@ func TestConvertResponse_WithReasoningContent(t *testing.T) {
 			t.Fatalf("unmarshal: %v", err)
 		}
 
-		m := newModelForTest()
+		m := newTextModelForTest()
 		got, err := m.convertResponse(&resp)
 		if err != nil {
 			t.Fatalf("convertResponse: %v", err)
@@ -386,7 +391,7 @@ func TestConvertResponse_WithReasoningContent(t *testing.T) {
 			t.Fatalf("unmarshal: %v", err)
 		}
 
-		m := newModelForTest()
+		m := newTextModelForTest()
 		got, err := m.convertResponse(&resp)
 		if err != nil {
 			t.Fatalf("convertResponse: %v", err)
@@ -431,7 +436,7 @@ func TestConvertResponse_WithReasoningContent(t *testing.T) {
 			t.Fatalf("unmarshal: %v", err)
 		}
 
-		m := newModelForTest()
+		m := newTextModelForTest()
 		got, err := m.convertResponse(&resp)
 		if err != nil {
 			t.Fatalf("convertResponse: %v", err)
@@ -452,40 +457,27 @@ func TestConvertResponse_WithReasoningContent(t *testing.T) {
 	})
 }
 
-// buildStreamFinalResponse must also surface reasoning_content as a leading
-// Thought part. The implementation path is shared with convertResponse but
-// reads from the accumulator, so a parallel regression test is needed.
-//
-// The accumulator embeds a ChatCompletion by value, so populating
-// acc.ChatCompletion via json.Unmarshal produces the same observable state
-// as a live stream that finished aggregating the chunks.
-func TestBuildStreamFinalResponse_WithReasoningContent(t *testing.T) {
-	t.Run("aggregated stream surfaces reasoning_content", func(t *testing.T) {
-		raw := []byte(`{
-            "id": "chatcmpl-s",
-            "object": "chat.completion",
-            "created": 0,
-            "model": "kimi-k2.6",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "Sure, here is the result.",
-                    "reasoning_content": "Streamed chain-of-thought."
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
-        }`)
-
-		var cc openai.ChatCompletion
-		if err := json.Unmarshal(raw, &cc); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+// buildStreamFinalResponse surfaces the reasoning the adapter accumulated
+// itself as leading Thought parts. It does not read reasoning off the SDK
+// accumulator: that aggregate merges chunks field by field and keeps no raw
+// JSON, so on a live stream there is no reasoning left to read there. This
+// test builds the accumulator by hand, which is exactly the path the real
+// stream takes.
+func TestBuildStreamFinalResponse_WithReasoning(t *testing.T) {
+	t.Run("accumulated reasoning surfaces as a leading thought part", func(t *testing.T) {
+		acc := &openai.ChatCompletionAccumulator{
+			ChatCompletion: openai.ChatCompletion{
+				Choices: []openai.ChatCompletionChoice{{
+					Message:      openai.ChatCompletionMessage{Content: "Sure, here is the result."},
+					FinishReason: "stop",
+				}},
+			},
 		}
-		acc := &openai.ChatCompletionAccumulator{ChatCompletion: cc}
+		reasoning := NewTextDialect().NewAccumulator()
+		reasoning.AddDelta([]*genai.Part{thoughtPart("Streamed chain-of-thought.")})
 
 		m := newModelForTest()
-		got := m.buildStreamFinalResponse(acc)
+		got := m.buildStreamFinalResponse(acc, reasoning)
 
 		if len(got.Content.Parts) != 2 {
 			t.Fatalf("expected 2 parts, got %d", len(got.Content.Parts))

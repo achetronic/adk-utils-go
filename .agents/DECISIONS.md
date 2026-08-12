@@ -1,6 +1,6 @@
 # DECISIONS.md
 
-Design decisions for the `genai/*` LLM adapters (`genai/openai` and
+Design decisions for the `genai/*` LLM adapters (`genai/openai/completions` and
 `genai/anthropic`). Each entry records *what* was decided and *why*, so the next
 person (or agent) doesn't re-litigate it or "fix" it back into a bug.
 
@@ -168,10 +168,16 @@ those.
 
 ---
 
-## OpenAI adapter (`genai/openai`)
+## OpenAI adapter (`genai/openai/completions`)
 
 Targets: OpenAI proper + OpenAI-compatible servers (Ollama, vLLM, LocalAI,
 LiteLLM, ...). Skews towards portability, not just the official endpoint.
+
+The adapter is OpenAI-pure by default: with no dialect configured it reads
+no provider field and sends none, which matches OpenAI's own API, where
+reasoning models never expose the reasoning text in Chat Completions.
+Providers that diverge from the documented OpenAI wire shape plug a dialect
+in (O10).
 
 ### O1 - `tool_call_id` <= 40 chars via hash + reverse map
 
@@ -270,6 +276,33 @@ inclusive and unchanged.
   total context usage.
 - **Missing details:** compatible providers that omit the field leave it at
   zero; genai's `omitempty` keeps the detail absent on serialisation.
+
+---
+
+### O10 - Provider divergences plug into the adapter through a Dialect
+
+The adapter speaks documented OpenAI wire only. Any divergence of a
+compatible provider plugs through `Config.Dialect` as a set of opt-in
+capability interfaces: a dialect implements only the seams its provider
+needs, and nil keeps the adapter OpenAI-pure, which is what OpenAI's own
+API requires. The capabilities and where the pipeline touches them are
+documented on the `Dialect` type.
+
+**Why:** without this seam the adapter degenerates into provider
+special-cases keyed by BaseURL. Capabilities keep the core generic for any
+compatible provider, and new divergence areas are added without touching
+existing dialects.
+
+### O11 - The Chat Completions adapter lives in `genai/openai/completions`
+
+The adapter moved down one level and was renamed from `openai` to
+`completions`.
+
+**Why:** a Responses API adapter joins the library. Two wire protocols
+cannot share a package, and sibling packages under a common parent
+(`openai/completions`, `openai/responses`) keep the import paths honest.
+No compatibility layer for the old path: consumers moved in the same
+change.
 
 ---
 

@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
 // SPDX-License-Identifier: Apache-2.0
 
-// Package openai provides an OpenAI-compatible LLM implementation for the ADK.
+// Package completions provides an OpenAI-compatible LLM implementation for the ADK.
 // It supports both native OpenAI API and compatible providers like Ollama.
-package openai
+package completions
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log/slog"
 	"mime"
 	"net/http"
 	"strings"
@@ -43,8 +44,30 @@ type Model struct {
 	client    *openai.Client
 	modelName string
 
-	// toolCallIDMap stores original IDs when they exceed OpenAI's limit.
-	// Keys are shortened hashes, values are original IDs.
+	// dialect carries the provider-specific behaviour this model opts into.
+	// Nil means OpenAI-pure: nothing is read, sent or reshaped beyond the
+	// documented OpenAI shapes. The capability fields below are the dialect
+	// asserted once in New, so the hot path is a nil check, not a type
+	// assertion.
+	dialect          Dialect
+	toolIDNormalizer ToolIDNormalizer
+	paramsAdjuster   ParamsAdjuster
+	reasoningDecoder ReasoningDecoder
+	reasoningEncoder ReasoningEncoder
+	usageDecoder     UsageDecoder
+	thinkingMapper   ThinkingMapper
+
+	// reasoningEgress is normalised in New, so the converters never
+	// re-derive a default.
+	reasoningEgress ReasoningEgressMode
+
+	// extraBody holds provider extensions merged into the root of every
+	// request body. It is a copy of the caller's map, read-only from here on,
+	// so concurrent requests can share it.
+	extraBody map[string]any
+
+	// toolCallIDMap stores original IDs when the wire shape differs from
+	// what ADK uses. Keys are the wire IDs, values the original IDs.
 	toolCallIDMap   map[string]string
 	toolCallIDMapMu sync.RWMutex
 }
@@ -66,6 +89,39 @@ type Config struct {
 	ModelName string
 	// HTTPOptions holds optional HTTP-level overrides (e.g. extra headers).
 	HTTPOptions HTTPOptions
+	// Dialect layers provider-specific wire behaviour onto the adapter:
+	// reasoning fields on ingest and egress, tool_call_id shapes, usage
+	// buckets outside the standard object, and a last pass over the request
+	// params. See the Dialect type for the capability interfaces. Nil (the
+	// zero value) keeps the adapter OpenAI-pure, which matches OpenAI's own
+	// API: its reasoning models never expose the reasoning text in Chat
+	// Completions responses, only a token count, so there is nothing to
+	// read or send back. Compatible providers plug a dialect in:
+	// NewTextDialect() for a plain-text reasoning field (Kimi, Mistral,
+	// vLLM, ...), DeepSeek for the same fields plus the provider's strict
+	// replay rule, OpenRouter for the structured reasoning_details shape,
+	// or a custom implementation for a wire shape this package does not
+	// know yet.
+	Dialect Dialect
+	// ReasoningEgress selects how thought Parts are sent back as history.
+	// Empty (the zero value) means ReasoningEgressNative. Use
+	// ReasoningEgressThinkTags for backends that reject an extra reasoning
+	// field, or ReasoningEgressOmit to send no reasoning at all. Without
+	// reasoning to send the mode changes nothing.
+	ReasoningEgress ReasoningEgressMode
+	// ExtraBody carries provider extensions that Chat Completions does not
+	// define, merged into the root of every request body. OpenRouter's
+	// reasoning controls live here, for example:
+	//
+	//	ExtraBody: map[string]any{
+	//		"reasoning": map[string]any{"effort": "high"},
+	//	}
+	//
+	// Values must be JSON-serialisable. A key that collides with a field the
+	// adapter sets replaces it on the wire, so this is an extension point, not
+	// a way to rewrite messages or model. The map is copied at construction,
+	// so mutating the caller's copy afterwards changes nothing.
+	ExtraBody map[string]any
 }
 
 // New creates a new OpenAI Model with the given configuration.
@@ -89,11 +145,57 @@ func New(cfg Config) *Model {
 
 	client := openai.NewClient(opts...)
 
-	return &Model{
-		client:        &client,
-		modelName:     cfg.ModelName,
-		toolCallIDMap: make(map[string]string),
+	// An unrecognised mode degrades to the native shape reasoning providers
+	// document rather than to silent data loss.
+	reasoningEgress := cfg.ReasoningEgress
+	switch reasoningEgress {
+	case ReasoningEgressNative, ReasoningEgressThinkTags, ReasoningEgressOmit:
+	default:
+		reasoningEgress = ReasoningEgressNative
 	}
+	// A dialect that knows its provider's replay rules vetoes shapes the
+	// provider rejects; the override is logged once, at construction.
+	if policy, ok := cfg.Dialect.(EgressPolicy); ok {
+		if effective := policy.ResolveEgress(reasoningEgress); effective != reasoningEgress {
+			slog.Warn("reasoning egress overridden by the dialect",
+				"model", cfg.ModelName,
+				"dialect", cfg.Dialect.Name(),
+				"requested", string(reasoningEgress),
+				"effective", string(effective),
+			)
+			reasoningEgress = effective
+		}
+	}
+
+	// Copied so a caller mutating its own map later cannot race with a
+	// request in flight.
+	var extraBody map[string]any
+	if len(cfg.ExtraBody) > 0 {
+		extraBody = make(map[string]any, len(cfg.ExtraBody))
+		for k, v := range cfg.ExtraBody {
+			extraBody[k] = v
+		}
+	}
+
+	m := &Model{
+		client:          &client,
+		modelName:       cfg.ModelName,
+		dialect:         cfg.Dialect,
+		reasoningEgress: reasoningEgress,
+		extraBody:       extraBody,
+		toolCallIDMap:   make(map[string]string),
+	}
+	// Capabilities are asserted once here so the conversion path only nil
+	// checks. A dialect picks exactly the areas it needs.
+	if d := cfg.Dialect; d != nil {
+		m.toolIDNormalizer, _ = d.(ToolIDNormalizer)
+		m.paramsAdjuster, _ = d.(ParamsAdjuster)
+		m.reasoningDecoder, _ = d.(ReasoningDecoder)
+		m.reasoningEncoder, _ = d.(ReasoningEncoder)
+		m.usageDecoder, _ = d.(UsageDecoder)
+		m.thinkingMapper, _ = d.(ThinkingMapper)
+	}
+	return m
 }
 
 // Name returns the model name.
@@ -113,7 +215,7 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 // generate sends a non-streaming request and yields a single response.
 func (m *Model) generate(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		params, err := m.buildChatCompletionParams(req)
+		params, err := m.buildChatCompletionParams(req, false)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -139,20 +241,24 @@ func (m *Model) generate(ctx context.Context, req *model.LLMRequest) iter.Seq2[*
 // as they arrive, followed by a final aggregated response.
 func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		params, err := m.buildChatCompletionParams(req)
+		params, err := m.buildChatCompletionParams(req, true)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
-		// Opt into the final usage chunk. Without stream_options.include_usage the
-		// server never emits it, the accumulator's Usage stays zero, and
-		// buildStreamFinalResponse yields a terminal LLMResponse with empty
-		// UsageMetadata - leaving consumers no way to price a streamed turn.
-		params.StreamOptions.IncludeUsage = param.NewOpt(true)
-
 		stream := m.client.Chat.Completions.NewStreaming(ctx, params)
 		acc := openai.ChatCompletionAccumulator{}
+		// Reasoning is accumulated here rather than read back off acc at the
+		// end: the SDK accumulator merges chunks field by field and keeps no
+		// raw JSON on the aggregated message, so every non-standard field
+		// (all reasoning is non-standard) is gone by the time the stream
+		// ends. Without a reasoning decoder there is nothing to accumulate,
+		// so this stays nil and every decode call below is skipped.
+		var reasoningAcc ReasoningAccumulator
+		if m.reasoningDecoder != nil {
+			reasoningAcc = m.reasoningDecoder.NewAccumulator()
+		}
 
 		// Yield partial responses as chunks arrive
 		for stream.Next() {
@@ -164,14 +270,16 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			}
 
 			delta := chunk.Choices[0].Delta
-			// reasoning_content is a non-standard field used by OpenAI-compatible
-			// providers (Kimi K2.6, DeepSeek-R1, Qwen3-Thinking, etc.) to stream
-			// hidden chain-of-thought tokens. The official OpenAI schema does not
-			// include it, so it is read from the raw JSON envelope rather than a
-			// typed field on Delta. See extractReasoningContent for details.
-			reasoning := extractReasoningContent(delta.RawJSON())
+			// Reasoning arrives in fields the official Chat Completions schema
+			// does not define, so the dialect reads it from the raw JSON
+			// envelope rather than from a typed field on Delta.
+			var reasoningParts []*genai.Part
+			if reasoningAcc != nil {
+				reasoningParts = m.reasoningDecoder.DecodeDelta(delta.RawJSON())
+				reasoningAcc.AddDelta(reasoningParts)
+			}
 
-			if delta.Content == "" && reasoning == "" {
+			if delta.Content == "" && len(reasoningParts) == 0 {
 				continue
 			}
 
@@ -180,10 +288,8 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 			// order in which the model produced them. Downstream consumers
 			// (e.g. ADK's llmagent) iterate parts and filter on Thought, so
 			// having reasoning first matches the natural transcript order.
-			var parts []*genai.Part
-			if reasoning != "" {
-				parts = append(parts, &genai.Part{Text: reasoning, Thought: true})
-			}
+			parts := make([]*genai.Part, 0, len(reasoningParts)+1)
+			parts = append(parts, reasoningParts...)
 			if delta.Content != "" {
 				parts = append(parts, &genai.Part{Text: delta.Content})
 			}
@@ -207,27 +313,28 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 		}
 
 		// Build and yield final aggregated response
-		yield(m.buildStreamFinalResponse(&acc), nil)
+		yield(m.buildStreamFinalResponse(&acc, reasoningAcc), nil)
 	}
 }
 
-// buildStreamFinalResponse creates the final LLMResponse from accumulated stream data.
-func (m *Model) buildStreamFinalResponse(acc *openai.ChatCompletionAccumulator) *model.LLMResponse {
+// buildStreamFinalResponse creates the final LLMResponse from accumulated
+// stream data. Reasoning comes from the adapter's own accumulator, not from
+// acc: the SDK aggregate keeps no raw JSON, so there is nothing to read
+// there. The accumulator is nil when no dialect decodes reasoning.
+func (m *Model) buildStreamFinalResponse(acc *openai.ChatCompletionAccumulator, reasoning ReasoningAccumulator) *model.LLMResponse {
 	content := &genai.Content{
 		Role:  genai.RoleModel,
 		Parts: []*genai.Part{},
 	}
 
+	// Reasoning Parts go before the final-answer Part to preserve the
+	// temporal order in which the model produced the tokens.
+	if reasoning != nil {
+		content.Parts = append(content.Parts, reasoning.Parts()...)
+	}
+
 	if len(acc.Choices) > 0 {
 		choice := acc.Choices[0]
-
-		// Same rationale as in generateStream: read reasoning_content from the
-		// raw JSON since openai-go does not type the non-standard field.
-		// Reasoning Part goes before the final-answer Part to preserve the
-		// temporal order in which the model produced the tokens.
-		if reasoning := extractReasoningContent(choice.Message.RawJSON()); reasoning != "" {
-			content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
-		}
 
 		if choice.Message.Content != "" {
 			content.Parts = append(content.Parts, &genai.Part{Text: choice.Message.Content})
@@ -251,15 +358,18 @@ func (m *Model) buildStreamFinalResponse(acc *openai.ChatCompletionAccumulator) 
 
 	return &model.LLMResponse{
 		Content:       content,
-		UsageMetadata: convertUsageMetadata(acc.Usage),
+		UsageMetadata: m.decodeUsageMetadata(acc.Usage),
 		FinishReason:  finishReason,
 		Partial:       false,
 		TurnComplete:  true,
 	}
 }
 
-// buildChatCompletionParams converts an LLMRequest into OpenAI API parameters.
-func (m *Model) buildChatCompletionParams(req *model.LLMRequest) (openai.ChatCompletionNewParams, error) {
+// buildChatCompletionParams converts an LLMRequest into OpenAI API
+// parameters. stream reports whether this call will stream; the dialect's
+// ParamsAdjuster sees it, because stream-only incompatibilities exist
+// (stream_options on some gateways).
+func (m *Model) buildChatCompletionParams(req *model.LLMRequest, stream bool) (openai.ChatCompletionNewParams, error) {
 	var messages []openai.ChatCompletionMessageParamUnion
 
 	// Add system instruction
@@ -288,6 +398,29 @@ func (m *Model) buildChatCompletionParams(req *model.LLMRequest) (openai.ChatCom
 		m.applyGenerationConfig(&params, req.Config)
 	}
 
+	// Streaming requests opt into the final usage chunk. Without
+	// stream_options.include_usage the server never emits it, the
+	// accumulator's Usage stays zero, and the terminal LLMResponse carries
+	// empty UsageMetadata - leaving consumers no way to price a streamed
+	// turn. Set before the dialect's last pass so a gateway that rejects
+	// the field can still strip it.
+	if stream {
+		params.StreamOptions.IncludeUsage = param.NewOpt(true)
+	}
+
+	// Provider extensions go on next so they land at the root of the body.
+	// The SDK has no typed field for them, so they travel through the same
+	// extra-fields escape hatch the reasoning fields use.
+	if len(m.extraBody) > 0 {
+		params.SetExtraFields(m.extraBody)
+	}
+
+	// The dialect's ParamsAdjuster fires last: it sees the exact body the
+	// wire will get, params and extra fields alike, and mutates it in place.
+	if m.paramsAdjuster != nil {
+		m.paramsAdjuster.AdjustParams(&params, req, stream)
+	}
+
 	return params, nil
 }
 
@@ -314,9 +447,17 @@ func (m *Model) applyGenerationConfig(params *openai.ChatCompletionNewParams, cf
 		}
 	}
 
-	// Reasoning effort (for o-series models)
+	// Reasoning effort: the dialect owns the mapping when it implements
+	// one. The native knob varies by provider (OpenRouter's effort lives in
+	// a reasoning object at the request root, vLLM and Qwen use
+	// enable_thinking), so one typed field cannot serve them all. Without
+	// a mapper the typed OpenAI field is used.
 	if cfg.ThinkingConfig != nil {
-		params.ReasoningEffort = convertThinkingLevel(cfg.ThinkingConfig.ThinkingLevel)
+		if m.thinkingMapper != nil {
+			m.thinkingMapper.ApplyThinkingLevel(params, cfg.ThinkingConfig.ThinkingLevel)
+		} else {
+			params.ReasoningEffort = convertThinkingLevel(cfg.ThinkingConfig.ThinkingLevel)
+		}
 	}
 
 	// JSON mode
@@ -394,11 +535,20 @@ func (m *Model) applyGenerationConfig(params *openai.ChatCompletionNewParams, cf
 func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatCompletionMessageParamUnion, error) {
 	var messages []openai.ChatCompletionMessageParamUnion
 	var textParts []string
+	var thoughts []*genai.Part
 	var toolCalls []openai.ChatCompletionMessageToolCallUnionParam
 	var mediaParts []openai.ChatCompletionContentPartUnionParam
 
 	for _, part := range content.Parts {
 		switch {
+		// Reasoning is collected apart from the reply text: merging the two
+		// into content hides the chain of thought inside the answer and
+		// leaves out the field the strict thinking providers require to be
+		// echoed back. This branch comes first because a thought Part also
+		// carries its text in Text.
+		case part.Thought:
+			thoughts = append(thoughts, part)
+
 		case part.FunctionResponse != nil:
 			// Skip ADK internal framework parts (HITL confirmation
 			// protocol): upstream providers reject them as undeclared
@@ -451,8 +601,43 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 		}
 	}
 
+	// Reasoning only belongs to an assistant turn. ADK's contents processor
+	// rewrites events authored by a different agent as user-role "For
+	// context:" content and passes non-text parts through verbatim, so a
+	// thought Part can legitimately arrive under a user role; that reasoning
+	// belongs to another conversation, and no provider accepts it on a user
+	// message, so it is dropped.
+	var reasoningExtra map[string]any
+	if convertRole(content.Role) == "assistant" && len(thoughts) > 0 {
+		switch m.reasoningEgress {
+		case ReasoningEgressThinkTags:
+			// The reasoning becomes part of content, ahead of the reply,
+			// which is the order the model produced it in. A new slice keeps
+			// the converter read-only over its input. A thought Part without
+			// readable text, an encrypted block's Part, contributes nothing.
+			if text := thoughtTextFor(thoughts); text != "" {
+				textParts = append([]string{"<think>\n" + text + "\n</think>"}, textParts...)
+			}
+		case ReasoningEgressOmit:
+			// Nothing to send, in any shape.
+		default:
+			// Native mode delegates the wire shape to the dialect. A dialect
+			// without an encoder degrades to think tags: the trace survives
+			// in content instead of being dropped, which a session replayed
+			// against a closed-schema backend still tolerates.
+			if m.reasoningEncoder != nil {
+				reasoningExtra = m.reasoningEncoder.EncodeReasoning(thoughts)
+			} else if text := thoughtTextFor(thoughts); text != "" {
+				textParts = append([]string{"<think>\n" + text + "\n</think>"}, textParts...)
+			}
+		}
+	}
+
+	// Reasoning alone does not produce a message: an assistant message with
+	// neither content nor tool_calls is not a valid Chat Completions message,
+	// and there is no other turn to attach the field to.
 	if len(textParts) > 0 || len(mediaParts) > 0 || len(toolCalls) > 0 {
-		msg := m.buildRoleMessage(content.Role, textParts, mediaParts, toolCalls)
+		msg := m.buildRoleMessage(content.Role, textParts, mediaParts, toolCalls, reasoningExtra)
 		if msg != nil {
 			messages = append(messages, *msg)
 		}
@@ -462,12 +647,14 @@ func (m *Model) convertContentToMessages(content *genai.Content) ([]openai.ChatC
 }
 
 // buildRoleMessage creates the appropriate message type based on role.
-func (m *Model) buildRoleMessage(role string, texts []string, media []openai.ChatCompletionContentPartUnionParam, toolCalls []openai.ChatCompletionMessageToolCallUnionParam) *openai.ChatCompletionMessageParamUnion {
+// reasoningExtra is only meaningful for the assistant role; the other roles
+// have no field to carry it.
+func (m *Model) buildRoleMessage(role string, texts []string, media []openai.ChatCompletionContentPartUnionParam, toolCalls []openai.ChatCompletionMessageToolCallUnionParam, reasoningExtra map[string]any) *openai.ChatCompletionMessageParamUnion {
 	switch convertRole(role) {
 	case "user":
 		return buildUserMessage(texts, media)
 	case "assistant":
-		return buildAssistantMessage(texts, toolCalls)
+		return buildAssistantMessage(texts, toolCalls, reasoningExtra)
 	case "system":
 		msg := openai.SystemMessage(joinTexts(texts))
 		return &msg
@@ -499,8 +686,13 @@ func buildUserMessage(texts []string, media []openai.ChatCompletionContentPartUn
 	}
 }
 
-// buildAssistantMessage creates an assistant message with optional tool calls.
-func buildAssistantMessage(texts []string, toolCalls []openai.ChatCompletionMessageToolCallUnionParam) *openai.ChatCompletionMessageParamUnion {
+// buildAssistantMessage creates an assistant message with optional tool calls
+// and reasoning. No reasoning field is defined by the Chat Completions
+// schema, so reasoning attaches through the SDK's extra-fields escape hatch
+// instead of typed fields. The extra map comes from the dialect's encoder:
+// OpenRouter writes the reasoning_details array, TextDialect the plain-text
+// field, each exactly as the provider expects.
+func buildAssistantMessage(texts []string, toolCalls []openai.ChatCompletionMessageToolCallUnionParam, reasoningExtra map[string]any) *openai.ChatCompletionMessageParamUnion {
 	msg := openai.ChatCompletionAssistantMessageParam{}
 
 	if len(texts) > 0 {
@@ -510,6 +702,9 @@ func buildAssistantMessage(texts []string, toolCalls []openai.ChatCompletionMess
 	}
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
+	}
+	if len(reasoningExtra) > 0 {
+		msg.SetExtraFields(reasoningExtra)
 	}
 
 	return &openai.ChatCompletionMessageParamUnion{OfAssistant: &msg}
@@ -527,11 +722,12 @@ func (m *Model) convertResponse(resp *openai.ChatCompletion) (*model.LLMResponse
 		Parts: []*genai.Part{},
 	}
 
-	// Same rationale as in buildStreamFinalResponse: read reasoning_content
-	// from the raw JSON since openai-go does not type the non-standard field
-	// used by OpenAI-compatible reasoning providers.
-	if reasoning := extractReasoningContent(choice.Message.RawJSON()); reasoning != "" {
-		content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
+	// Reasoning lives in fields openai-go does not type, so the dialect
+	// reads it from the raw JSON envelope. Without a reasoning decoder
+	// nothing is read, which is what OpenAI's own reasoning models need:
+	// they never expose the reasoning text on this API.
+	if m.reasoningDecoder != nil {
+		content.Parts = append(content.Parts, m.reasoningDecoder.DecodeMessage(choice.Message.RawJSON())...)
 	}
 
 	if choice.Message.Content != "" {
@@ -550,10 +746,23 @@ func (m *Model) convertResponse(resp *openai.ChatCompletion) (*model.LLMResponse
 
 	return &model.LLMResponse{
 		Content:       content,
-		UsageMetadata: convertUsageMetadata(resp.Usage),
+		UsageMetadata: m.decodeUsageMetadata(resp.Usage),
 		FinishReason:  convertFinishReason(string(choice.FinishReason)),
 		TurnComplete:  true,
 	}, nil
+}
+
+// decodeUsageMetadata builds the standard usage mapping and lets the dialect
+// fold in buckets the provider reports outside the standard object. The
+// dialect sees the raw usage envelope; the SDK's raw JSON is empty only for
+// hand-built structs, never for a live response.
+func (m *Model) decodeUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
+	metadata := convertUsageMetadata(usage)
+	if metadata == nil || m.usageDecoder == nil {
+		return metadata
+	}
+	m.usageDecoder.DecodeUsage(usage.RawJSON(), metadata)
+	return metadata
 }
 
 // convertTools transforms genai tools into OpenAI function tool format.
@@ -705,9 +914,22 @@ func convertSchema(schema *genai.Schema) (map[string]any, error) {
 	return result, nil
 }
 
-// normalizeToolCallID shortens IDs exceeding OpenAI's 40-char limit using a hash.
-// The mapping is stored to allow reverse lookup if needed.
+// normalizeToolCallID produces the wire shape the provider accepts for tool
+// call IDs. A dialect's ToolIDNormalizer owns it entirely when present; the
+// adapter keeps the wire-to-original mapping either way so ADK keeps seeing
+// its own IDs. Without a dialect the OpenAI rule applies: IDs over 40
+// characters are hashed shorter, the rest pass through.
 func (m *Model) normalizeToolCallID(id string) string {
+	if m.toolIDNormalizer != nil {
+		normalized := m.toolIDNormalizer.NormalizeToolID(id)
+		if normalized != id {
+			m.toolCallIDMapMu.Lock()
+			m.toolCallIDMap[normalized] = id
+			m.toolCallIDMapMu.Unlock()
+		}
+		return normalized
+	}
+
 	if len(id) <= maxToolCallIDLength {
 		return id
 	}
@@ -722,7 +944,7 @@ func (m *Model) normalizeToolCallID(id string) string {
 	return shortID
 }
 
-// denormalizeToolCallID restores the original ID from a shortened one.
+// denormalizeToolCallID restores the original ID from a wire one.
 func (m *Model) denormalizeToolCallID(shortID string) string {
 	m.toolCallIDMapMu.RLock()
 	defer m.toolCallIDMapMu.RUnlock()
@@ -854,30 +1076,6 @@ func convertUsageMetadata(usage openai.CompletionUsage) *genai.GenerateContentRe
 		ThoughtsTokenCount:      int32(usage.CompletionTokensDetails.ReasoningTokens),
 		CachedContentTokenCount: int32(usage.PromptTokensDetails.CachedTokens),
 	}
-}
-
-// extractReasoningContent reads the non-standard "reasoning_content" field
-// from the SDK's raw JSON envelope.
-//
-// Chat Completions does not define this field: OpenAI's own reasoning models
-// hide the reasoning text and report only the token count. Compatible
-// providers (DeepSeek-R1, Kimi K2/K2.6, Qwen3-Thinking) add it on
-// choices[].message and choices[].delta. openai-go does not type it but
-// keeps it in the raw JSON, reachable via RawJSON().
-//
-// Returns "" when the field is absent, empty, or unparseable; callers treat
-// empty as "no reasoning content" and skip the thought Part.
-func extractReasoningContent(rawJSON string) string {
-	if rawJSON == "" {
-		return ""
-	}
-	var probe struct {
-		ReasoningContent string `json:"reasoning_content"`
-	}
-	if err := json.Unmarshal([]byte(rawJSON), &probe); err != nil {
-		return ""
-	}
-	return probe.ReasoningContent
 }
 
 // convertRole maps genai roles to OpenAI roles.

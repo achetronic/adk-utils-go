@@ -47,9 +47,9 @@ go get github.com/achetronic/adk-utils-go
 Works with OpenAI API and any OpenAI-compatible API (Ollama, OpenRouter, Azure OpenAI, etc.):
 
 ```go
-import genaiopenai "github.com/achetronic/adk-utils-go/genai/openai"
+import "github.com/achetronic/adk-utils-go/genai/openai/completions"
 
-llmModel := genaiopenai.New(genaiopenai.Config{
+llmModel := completions.New(completions.Config{
     APIKey:    os.Getenv("OPENAI_API_KEY"),
     BaseURL:   "http://localhost:11434/v1", // For Ollama
     ModelName: "gpt-4o",                     // Or "qwen3:8b" for Ollama
@@ -58,6 +58,67 @@ llmModel := genaiopenai.New(genaiopenai.Config{
 agent, _ := llmagent.New(llmagent.Config{
     Name:  "assistant",
     Model: llmModel,
+})
+```
+
+#### Provider dialects
+
+By default the client is OpenAI-pure: it reads no provider-specific field and
+sends none, which is what OpenAI's own API expects (its reasoning models
+never expose the reasoning text in Chat Completions). A provider that
+diverges from the documented OpenAI wire shape plugs a dialect in. A dialect
+opts into exactly the areas it needs: reasoning on ingest and egress, the
+tool_call_id shape, usage buckets outside the standard object, and a last
+pass over the request params.
+
+```go
+// Plain-text reasoning (Kimi, Mistral, vLLM, llama.cpp, ...)
+llmModel := completions.New(completions.Config{
+    BaseURL:   "http://localhost:11434/v1",
+    ModelName: "qwen3:8b",
+    Dialect:   completions.NewTextDialect(),
+})
+
+// DeepSeek: the same fields, plus a replay rule the provider enforces
+llmModel := completions.New(completions.Config{
+    BaseURL:   "https://api.deepseek.com/v1",
+    ModelName: "deepseek-reasoner",
+    Dialect:   completions.DeepSeek,
+})
+
+// OpenRouter's structured reasoning_details (signatures, encrypted blocks)
+llmModel := completions.New(completions.Config{
+    BaseURL:   "https://openrouter.ai/api/v1",
+    ModelName: "anthropic/claude-sonnet-4.6",
+    Dialect:   completions.OpenRouter,
+})
+```
+
+Reasoning is sent back as its own field on the assistant message by default.
+Backends that reject unknown fields can fold it into the content as a
+`<think>` block instead, or drop it entirely. A dialect whose provider forbids
+a shape narrows the knob to the accepted ones and logs the override, so an
+invalid combination never reaches the wire:
+
+```go
+llmModel := completions.New(completions.Config{
+    ModelName:       "qwen3:8b",
+    Dialect:         completions.NewTextDialect(),
+    ReasoningEgress: completions.ReasoningEgressThinkTags,
+})
+```
+
+OpenRouter's request-side reasoning controls (effort, max tokens) are not
+typed fields; send them through `ExtraBody`:
+
+```go
+llmModel := completions.New(completions.Config{
+    BaseURL:   "https://openrouter.ai/api/v1",
+    ModelName: "anthropic/claude-sonnet-4.6",
+    Dialect:   completions.OpenRouter,
+    ExtraBody: map[string]any{
+        "reasoning": map[string]any{"effort": "high"},
+    },
 })
 ```
 

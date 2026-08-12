@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
 // SPDX-License-Identifier: Apache-2.0
 
-package openai
+package completions
 
 import (
 	"strings"
@@ -225,7 +225,7 @@ func TestBuildRoleMessage(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := newModelForTest()
 			toolCalls := make([]openai.ChatCompletionMessageToolCallUnionParam, c.toolCalls)
-			got := m.buildRoleMessage(c.role, c.texts, nil, toolCalls)
+			got := m.buildRoleMessage(c.role, c.texts, nil, toolCalls, nil)
 
 			if c.wantKind == "" {
 				if got != nil {
@@ -265,7 +265,7 @@ func TestBuildAssistantMessage(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			toolCalls := make([]openai.ChatCompletionMessageToolCallUnionParam, c.toolCalls)
-			got := buildAssistantMessage(c.texts, toolCalls)
+			got := buildAssistantMessage(c.texts, toolCalls, nil)
 			if got == nil {
 				t.Fatalf("buildAssistantMessage returned nil")
 			}
