@@ -277,6 +277,14 @@ func TestNormalizeToolCallID(t *testing.T) {
 	})
 }
 
+// newModelForTest builds a model without a reasoning codec, the
+// OpenAI-native shape the conversion tests exercise.
 func newModelForTest() *Model {
-	return &Model{toolCallIDMap: make(map[string]string)}
+	return New(Config{ModelName: "gpt-test"})
+}
+
+// newTextModelForTest builds a model whose reasoning travels through the
+// plain-text dialect, the shape the conversion tests assert against.
+func newTextModelForTest() *Model {
+	return New(Config{ModelName: "gpt-test", Dialect: NewTextDialect()})
 }

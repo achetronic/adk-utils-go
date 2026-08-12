@@ -61,6 +61,67 @@ agent, _ := llmagent.New(llmagent.Config{
 })
 ```
 
+#### Provider dialects
+
+By default the client is OpenAI-pure: it reads no provider-specific field and
+sends none, which is what OpenAI's own API expects (its reasoning models
+never expose the reasoning text in Chat Completions). A provider that
+diverges from the documented OpenAI wire shape plugs a dialect in. A dialect
+opts into exactly the areas it needs: reasoning on ingest and egress, the
+tool_call_id shape, usage buckets outside the standard object, and a last
+pass over the request params.
+
+```go
+// Plain-text reasoning (Kimi, Mistral, vLLM, ...)
+llmModel := genaiopenai.New(genaiopenai.Config{
+    BaseURL:   "http://localhost:11434/v1",
+    ModelName: "qwen3:8b",
+    Dialect:   genaiopenai.NewTextDialect(),
+})
+
+// DeepSeek: the same fields, plus a replay rule the provider enforces
+llmModel := genaiopenai.New(genaiopenai.Config{
+    BaseURL:   "https://api.deepseek.com/v1",
+    ModelName: "deepseek-reasoner",
+    Dialect:   genaiopenai.DeepSeek,
+})
+
+// OpenRouter's structured reasoning_details (signatures, encrypted blocks)
+llmModel := genaiopenai.New(genaiopenai.Config{
+    BaseURL:   "https://openrouter.ai/api/v1",
+    ModelName: "anthropic/claude-sonnet-4.6",
+    Dialect:   genaiopenai.OpenRouter,
+})
+```
+
+Reasoning is sent back as its own field on the assistant message by default.
+Backends that reject unknown fields can fold it into the content as a
+`<think>` block instead, or drop it entirely. A dialect whose provider forbids
+a shape narrows the knob to the accepted ones and logs the override, so an
+invalid combination never reaches the wire:
+
+```go
+llmModel := genaiopenai.New(genaiopenai.Config{
+    ModelName:       "qwen3:8b",
+    Dialect:         genaiopenai.NewTextDialect(),
+    ReasoningEgress: genaiopenai.ReasoningEgressThinkTags,
+})
+```
+
+OpenRouter's request-side reasoning controls (effort, max tokens) are not
+typed fields; send them through `ExtraBody`:
+
+```go
+llmModel := genaiopenai.New(genaiopenai.Config{
+    BaseURL:   "https://openrouter.ai/api/v1",
+    ModelName: "anthropic/claude-sonnet-4.6",
+    Dialect:   genaiopenai.OpenRouter,
+    ExtraBody: map[string]any{
+        "reasoning": map[string]any{"effort": "high"},
+    },
+})
+```
+
 ### Anthropic Client
 
 Native Anthropic Claude support:

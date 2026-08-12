@@ -123,7 +123,7 @@ adk-utils-go/
 | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `genai/common`        | Helpers shared by the LLM adapters so cross-provider wire rules are implemented once (e.g. `MarshalToolPayload`)  |
 | `genai/anthropic`     | Anthropic Claude `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)          |
-| `genai/openai`        | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`)  |
+| `genai/openai`        | OpenAI/Ollama-compatible `model.LLM` adapter (forwards `ToolConfig.FunctionCallingConfig.Mode` as `tool_choice`; provider divergences plug in through a Dialect of capabilities, nil = OpenAI-pure, see DECISIONS O10-O12)  |
 | `session/redis`       | Redis-backed implementation of `session.Service`                                                                  |
 | `memory/memorytypes`  | Shared types (`EntryWithID`) and interfaces (`MemoryService`, `ExtendedMemoryService`)                            |
 | `memory/postgres`     | PostgreSQL+pgvector implementation of `memory.Service` and `ExtendedMemoryService`                                |
