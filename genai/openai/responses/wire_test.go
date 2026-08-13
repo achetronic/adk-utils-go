@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"google.golang.org/adk/v2/model"
@@ -247,6 +248,51 @@ func TestWireBody_StreamMalformedTerminalArguments(t *testing.T) {
 	}
 	if gotErr == nil {
 		t.Fatalf("expected an error for malformed terminal arguments, got none")
+	}
+}
+
+// A gateway that streams function_call items with object-form arguments must
+// deliver those arguments in the final response; reading only the string
+// union arm would yield the call with an empty argument map.
+func TestWireBody_StreamObjectArguments(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: response.output_item.done\n")
+		io.WriteString(w, `data: {"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":{"q":"weather"}}}`+"\n\n")
+		io.WriteString(w, "event: response.completed\n")
+		io.WriteString(w, `data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_1","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":{"q":"weather"}}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "gpt-test"})
+
+	req := &model.LLMRequest{Contents: []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{{Text: "hi"}}},
+	}}
+	var final *model.LLMResponse
+	for resp, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			t.Fatalf("GenerateContent: %v", err)
+		}
+		if resp != nil && !resp.Partial {
+			final = resp
+		}
+	}
+	if final == nil {
+		t.Fatalf("no final response yielded")
+	}
+	var fc *genai.FunctionCall
+	for _, p := range final.Content.Parts {
+		if p.FunctionCall != nil {
+			fc = p.FunctionCall
+		}
+	}
+	if fc == nil {
+		t.Fatalf("no FunctionCall in final response: %#v", final.Content)
+	}
+	if want := map[string]any{"q": "weather"}; !reflect.DeepEqual(fc.Args, want) {
+		t.Errorf("Args = %#v, want %#v", fc.Args, want)
 	}
 }
 

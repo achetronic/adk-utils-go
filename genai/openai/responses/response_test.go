@@ -162,6 +162,45 @@ func TestConvertResponse_ToolCall(t *testing.T) {
 	}
 }
 
+// Object-form arguments from OpenAI-compatible gateways must survive the
+// conversion; reading only the string union arm would drop them.
+func TestConvertResponse_ToolCallObjectArguments(t *testing.T) {
+	raw := []byte(`{
+		"id": "resp-2",
+		"status": "completed",
+		"output": [{
+			"type": "function_call",
+			"id": "fc-1",
+			"call_id": "call_42",
+			"name": "search",
+			"arguments": {"q": "weather"}
+		}],
+		"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+			"input_tokens_details": {"cached_tokens": 0},
+			"output_tokens_details": {"reasoning_tokens": 0}}
+	}`)
+
+	var resp responses.Response
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got, err := convertResponse(&resp, "test-origin")
+	if err != nil {
+		t.Fatalf("convertResponse: %v", err)
+	}
+	if len(got.Content.Parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(got.Content.Parts))
+	}
+	fc := got.Content.Parts[0].FunctionCall
+	if fc == nil {
+		t.Fatalf("expected FunctionCall")
+	}
+	if want := map[string]any{"q": "weather"}; !reflect.DeepEqual(fc.Args, want) {
+		t.Errorf("Args = %#v, want %#v", fc.Args, want)
+	}
+}
+
 func TestConvertResponse_TextPlusToolCall(t *testing.T) {
 	raw := []byte(`{
 		"id": "resp-3",

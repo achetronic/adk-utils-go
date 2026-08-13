@@ -67,6 +67,9 @@ var (
 	// skipped (unknown item types, or known items carrying no content), so
 	// converting it would produce an empty completed turn.
 	ErrNoConsumableOutput = errors.New("no consumable output items in OpenAI Responses API response")
+	// ErrFunctionCallArgs reports function call arguments that do not decode
+	// into a JSON object.
+	ErrFunctionCallArgs = errors.New("undecodable function call arguments in OpenAI Responses API response")
 )
 
 // Model implements model.LLM using the OpenAI Responses API.
@@ -268,7 +271,7 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 				// final event includes them: losing a tool call would
 				// silently break the agent loop.
 				if event.Item.Type == "function_call" {
-					args, err := parseJSONArgs(event.Item.Arguments.OfString)
+					args, err := functionCallArgs(event.Item)
 					if err != nil {
 						yield(nil, err)
 						return
@@ -1119,7 +1122,7 @@ func convertResponse(resp *responses.Response, origin string) (*model.LLMRespons
 			}
 
 		case "function_call":
-			args, err := parseJSONArgs(item.Arguments.OfString)
+			args, err := functionCallArgs(item)
 			if err != nil {
 				return nil, err
 			}
@@ -2137,6 +2140,37 @@ func joinTexts(texts []string) string {
 func joinSortedKeys(set map[string]bool) string {
 	keys := slices.Sorted(maps.Keys(set))
 	return strings.Join(keys, ", ")
+}
+
+// functionCallArgs decodes a function call item's arguments, which arrive
+// either as a JSON string (the OpenAI form) or as a bare JSON object (some
+// OpenAI-compatible gateways). Reading only the string arm would silently
+// drop the object form's arguments.
+func functionCallArgs(item responses.ResponseOutputItemUnion) (map[string]any, error) {
+	raw := item.Arguments.OfString
+	switch v := item.Arguments.OfResponseToolSearchCallArguments.(type) {
+	case nil, string:
+		// String arm, or no arguments at all: OfString holds the payload.
+	default:
+		// Bare arm: decode from the wire bytes, so the SDK's first-key-wins
+		// union decode cannot disagree with the last-key-wins semantics of
+		// the unmarshal below.
+		raw = item.Arguments.JSON.OfResponseToolSearchCallArguments.Raw()
+		if raw == "" {
+			// A hand-built value has no wire bytes for a re-encode to
+			// disagree with.
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("%w (name %q, call_id %q): %w", ErrFunctionCallArgs, item.Name, item.CallID, err)
+			}
+			raw = string(b)
+		}
+	}
+	args, err := parseJSONArgs(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w (name %q, call_id %q): %w", ErrFunctionCallArgs, item.Name, item.CallID, err)
+	}
+	return args, nil
 }
 
 // parseJSONArgs parses a function-call arguments string into a map. Malformed
