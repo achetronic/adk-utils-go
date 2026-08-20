@@ -816,10 +816,12 @@ func convertContentToInputItems(content *genai.Content, origin string, dangling 
 		if part.Thought {
 			continue
 		}
-		if part.FunctionCall != nil && dangling[part.FunctionCall.ID] {
+		if part.FunctionCall != nil &&
+			(dangling[part.FunctionCall.ID] || common.IsADKInternalCall(part.FunctionCall.Name)) {
 			continue
 		}
-		if part.FunctionResponse != nil && dangling[part.FunctionResponse.ID] {
+		if part.FunctionResponse != nil &&
+			(dangling[part.FunctionResponse.ID] || common.IsADKInternalCall(part.FunctionResponse.Name)) {
 			continue
 		}
 		if part.FunctionCall != nil || part.FunctionResponse != nil ||
@@ -924,6 +926,12 @@ func convertContentToInputItems(content *genai.Content, origin string, dangling 
 	for i, part := range content.Parts {
 		switch {
 		case part.FunctionResponse != nil:
+			// Skip ADK internal framework parts (HITL confirmation
+			// protocol): they are not tools the model declared, and the
+			// API rejects undeclared call/output items.
+			if common.IsADKInternalCall(part.FunctionResponse.Name) {
+				continue
+			}
 			if dangling[part.FunctionResponse.ID] {
 				continue
 			}
@@ -937,6 +945,9 @@ func convertContentToInputItems(content *genai.Content, origin string, dangling 
 			))
 
 		case part.FunctionCall != nil:
+			if common.IsADKInternalCall(part.FunctionCall.Name) {
+				continue
+			}
 			if dangling[part.FunctionCall.ID] {
 				continue
 			}
