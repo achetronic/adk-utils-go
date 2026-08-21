@@ -300,6 +300,50 @@ func TestConvertResponse_WithReasoning(t *testing.T) {
 	}
 }
 
+// A reasoning item whose summary is empty but whose content field carries
+// the reasoning text (gateways converting other providers fill it that way)
+// must still produce a thought part instead of dropping the thinking.
+func TestConvertResponse_ReasoningContentFallback(t *testing.T) {
+	raw := []byte(`{
+		"id": "resp-7",
+		"status": "completed",
+		"output": [
+			{
+				"type": "reasoning",
+				"id": "rs-1",
+				"summary": [],
+				"content": [{"type": "reasoning_text", "text": "Compare the decimals."}]
+			},
+			{
+				"type": "message",
+				"id": "msg-1",
+				"role": "assistant",
+				"status": "completed",
+				"content": [{"type": "output_text", "text": "9.9 is larger."}]
+			}
+		],
+		"usage": {"input_tokens": 5, "output_tokens": 10, "total_tokens": 15,
+			"input_tokens_details": {"cached_tokens": 0},
+			"output_tokens_details": {"reasoning_tokens": 7}}
+	}`)
+
+	var resp responses.Response
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got, err := convertResponse(&resp, "test-origin")
+	if err != nil {
+		t.Fatalf("convertResponse: %v", err)
+	}
+	if len(got.Content.Parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d", len(got.Content.Parts))
+	}
+	if !got.Content.Parts[0].Thought || got.Content.Parts[0].Text != "Compare the decimals." {
+		t.Errorf("first part should carry the reasoning content text: %#v", got.Content.Parts[0])
+	}
+}
+
 // A reasoning item with encrypted content but an empty summary (common for
 // reasoning models) must still produce a thought part: dropping it would
 // lose the encrypted content needed to replay the item on the next turn.

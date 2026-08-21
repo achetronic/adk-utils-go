@@ -249,7 +249,12 @@ func (m *Model) generateStream(ctx context.Context, req *model.LLMRequest) iter.
 					return
 				}
 
-			case "response.reasoning_summary_text.delta":
+			// OpenAI streams reasoning as summary deltas; gateways that
+			// convert other providers (e.g. new-api in front of Qwen or
+			// DeepSeek) stream the reasoning text channel instead. Either
+			// way it is the turn's thinking, so both feed the same parts.
+			case "response.reasoning_summary_text.delta",
+				"response.reasoning_text.delta":
 				if event.Delta == "" {
 					continue
 				}
@@ -1080,6 +1085,16 @@ func convertResponse(resp *responses.Response, origin string) (*model.LLMRespons
 			for _, summary := range item.Summary {
 				if summary.Text != "" {
 					summaryTexts = append(summaryTexts, summary.Text)
+				}
+			}
+			// Gateways converting other providers may fill the reasoning
+			// content field instead of the summary; without this fallback
+			// their thinking would be dropped from the final content.
+			if len(summaryTexts) == 0 {
+				for _, rc := range item.Content {
+					if rc.Text != "" {
+						summaryTexts = append(summaryTexts, rc.Text)
+					}
 				}
 			}
 			if len(summaryTexts) == 0 && item.EncryptedContent == "" {

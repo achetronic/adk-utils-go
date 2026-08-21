@@ -689,6 +689,60 @@ func TestWireBody_StreamFallbackPrependsDeltaReasoning(t *testing.T) {
 	}
 }
 
+// Gateways converting other providers stream reasoning on the text channel
+// (response.reasoning_text.delta) rather than the summary channel OpenAI
+// uses. The deltas must yield live thought parts and feed the fallback
+// accumulator, or such backends show no thinking at all.
+func TestWireBody_StreamReasoningTextDeltas(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: response.reasoning_text.delta\n")
+		io.WriteString(w, `data: {"type":"response.reasoning_text.delta","delta":"compare the ","sequence_number":1}`+"\n\n")
+		io.WriteString(w, "event: response.reasoning_text.delta\n")
+		io.WriteString(w, `data: {"type":"response.reasoning_text.delta","delta":"decimals","sequence_number":2}`+"\n\n")
+		io.WriteString(w, "event: response.output_item.done\n")
+		io.WriteString(w, `data: {"type":"response.output_item.done","sequence_number":3,"output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"9.9 is larger"}]}}`+"\n\n")
+		io.WriteString(w, "event: response.completed\n")
+		io.WriteString(w, `data: {"type":"response.completed","sequence_number":4,"response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	m := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelName: "qwen-test"})
+
+	var partialThoughts []string
+	var final *model.LLMResponse
+	req := &model.LLMRequest{Contents: []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{{Text: "9.11 vs 9.9?"}}},
+	}}
+	for resp, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			t.Fatalf("GenerateContent: %v", err)
+		}
+		if resp.Partial && len(resp.Content.Parts) == 1 && resp.Content.Parts[0].Thought {
+			partialThoughts = append(partialThoughts, resp.Content.Parts[0].Text)
+		}
+		if !resp.Partial {
+			final = resp
+		}
+	}
+	if len(partialThoughts) != 2 {
+		t.Fatalf("expected 2 live thought partials, got %d: %v", len(partialThoughts), partialThoughts)
+	}
+	if final == nil {
+		t.Fatalf("no final response was yielded")
+	}
+	if len(final.Content.Parts) != 2 {
+		t.Fatalf("expected 2 parts (thought + message), got %d: %+v", len(final.Content.Parts), final.Content.Parts)
+	}
+	if p := final.Content.Parts[0]; !p.Thought || p.Text != "compare the decimals" {
+		t.Errorf("first part = %+v, want the accumulated reasoning text", p)
+	}
+	if p := final.Content.Parts[1]; p.Text != "9.9 is larger" {
+		t.Errorf("second part = %+v, want the done message", p)
+	}
+}
+
 // response.failed and bare error events must surface as errors, not as an
 // empty or truncated turn.
 func TestWireBody_StreamFailureEvents(t *testing.T) {
