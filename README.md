@@ -556,7 +556,7 @@ Complete working examples in the `examples/` directory:
 
 | Example                                       | Description                                 |
 | --------------------------------------------- | ------------------------------------------- |
-| [openai-client](examples/openai-client)       | OpenAI/Ollama client usage                                |
+| [openai-completions-client](examples/openai-completions-client) | OpenAI Chat Completions client usage (Ollama, OpenRouter, ...) |
 | [openai-responses-client](examples/openai-responses-client) | OpenAI Responses API client usage |
 | [anthropic-client](examples/anthropic-client) | Anthropic Claude client usage                             |
 | [session-memory](examples/session-memory)     | Session management with Redis                             |
@@ -574,7 +574,7 @@ ollama pull qwen3:8b
 ollama pull nomic-embed-text
 
 # Run an example
-go run ./examples/openai-client
+go run ./examples/openai-completions-client
 ```
 
 ### Environment Variables
