@@ -108,7 +108,8 @@ adk-utils-go/
 │       ├── types.go         # Config struct with yaml/json tags, IsEnabled()
 │       └── context.go       # Context helpers: WithUserID, WithTags, WithTraceMetadata, etc.
 ├── examples/
-│   ├── openai-client/main.go
+│   ├── openai-completions-client/main.go
+│   ├── openai-responses-client/main.go
 │   ├── anthropic-client/main.go
 │   ├── session-memory/main.go
 │   ├── long-term-memory/main.go

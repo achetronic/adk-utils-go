@@ -18,8 +18,9 @@ This repository provides production-ready implementations for:
 
 ```
 ├── genai/            # LLM client implementations
-│   ├── openai/       # OpenAI Chat Completions client (works with Ollama, OpenRouter, etc.)
-│   │   └── responses/  # OpenAI Responses API client (/v1/responses)
+│   ├── openai/       # OpenAI API clients
+│   │   ├── completions/ # Chat Completions client (works with Ollama, OpenRouter, etc.)
+│   │   └── responses/   # Responses API client (/v1/responses)
 │   └── anthropic/    # Anthropic Claude client
 ├── session/          # Session service implementations
 │   └── redis/        # Redis session service
@@ -43,7 +44,7 @@ go get github.com/achetronic/adk-utils-go
 
 ## LLM Clients
 
-### OpenAI Client
+### OpenAI Chat Completions Client
 
 Works with OpenAI API and any OpenAI-compatible API (Ollama, OpenRouter, Azure OpenAI, etc.):
 
@@ -189,6 +190,39 @@ agent, _ := llmagent.New(llmagent.Config{
 })
 ```
 
+#### Reasoning in the Responses client
+
+Set a `ThinkingConfig` on the generation config and it maps to the Responses
+`reasoning.effort` level (`minimal` / `low` / `medium` / `high`);
+`IncludeThoughts: true` additionally asks for the reasoning summaries. When
+streaming, both summaries and the gateway-native reasoning text channel arrive
+as partial parts flagged `Thought: true`:
+
+```go
+resp := llmModel.GenerateContent(ctx, &model.LLMRequest{
+    Config: &genai.GenerateContentConfig{
+        ThinkingConfig: &genai.ThinkingConfig{
+            ThinkingLevel:   genai.ThinkingLevelHigh,
+            IncludeThoughts: true,
+        },
+    },
+    Contents: ...,
+}, true) // stream
+```
+
+Reasoning is requested with `reasoning.encrypted_content` included and
+`store: false`, so each reasoning item comes back encrypted and is replayed on
+the next turn: the model keeps its chain of thought across tool calls, as
+reasoning models require. Encrypted content is bound to the channel that
+produced it (base URL + API key + model), so a mid-session provider switch
+drops it gracefully instead of failing with a 400.
+
+Against OpenAI-compatible gateways that translate Responses to other backends
+(OpenRouter, LiteLLM, Hyper, ...) the same adapter degrades by design:
+gateways that never emit encrypted content simply re-reason each turn, streams
+that close without a terminal event are synthesized from the accumulated
+deltas, and reasoning text is still surfaced when the gateway streams it.
+
 ### Choosing between the OpenAI adapters
 
 Pick whichever fits your needs:
@@ -198,7 +232,7 @@ Pick whichever fits your needs:
 | `genai/openai/responses` (Responses API) | OpenAI's recommended API: native reasoning items and structured output |
 | `genai/openai/completions` (Chat Completions) | OpenAI-compatible gateways: Ollama, vLLM, DeepSeek, Kimi, etc. |
 
-Both OpenAI clients share the same `Config` fields (`APIKey`, `BaseURL`, `ModelName`, `HTTPOptions`). Reasoning is controlled per request through the ADK generation config: a `ThinkingConfig` maps to the Responses `reasoning.effort` level (`low` / `medium` / `high`) rather than a fixed token budget. Structured output is enabled by setting a response schema (JSON Schema) on the generation config.
+Both OpenAI clients share the same `Config` fields (`APIKey`, `BaseURL`, `ModelName`, `HTTPOptions`), so switching between them is a one-line import change. Reasoning is controlled per request through the ADK generation config: a `ThinkingConfig` maps to the Responses `reasoning.effort` level (`low` / `medium` / `high`) rather than a fixed token budget. Structured output is enabled by setting a response schema (JSON Schema) on the generation config. Note that the Chat Completions dialect system does not apply to the Responses client: the Responses API types reasoning natively, so there is no provider-specific wire shape to translate.
 
 ### Custom HTTP Headers
 
@@ -522,7 +556,7 @@ Complete working examples in the `examples/` directory:
 
 | Example                                       | Description                                 |
 | --------------------------------------------- | ------------------------------------------- |
-| [openai-client](examples/openai-client)       | OpenAI/Ollama client usage                                |
+| [openai-completions-client](examples/openai-completions-client) | OpenAI Chat Completions client usage (Ollama, OpenRouter, ...) |
 | [openai-responses-client](examples/openai-responses-client) | OpenAI Responses API client usage |
 | [anthropic-client](examples/anthropic-client) | Anthropic Claude client usage                             |
 | [session-memory](examples/session-memory)     | Session management with Redis                             |
@@ -540,7 +574,7 @@ ollama pull qwen3:8b
 ollama pull nomic-embed-text
 
 # Run an example
-go run ./examples/openai-client
+go run ./examples/openai-completions-client
 ```
 
 ### Environment Variables
