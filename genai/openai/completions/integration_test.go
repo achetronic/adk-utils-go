@@ -104,7 +104,7 @@ func sendReal(t *testing.T, body []byte) {
 // exact same body the adapter produces.
 func captureWireBody(t *testing.T, req *model.LLMRequest) []byte {
 	t.Helper()
-	body := captureBody(t, req)
+	body := captureBodyWithNoDialect(t, req)
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("re-marshal captured body: %v", err)
