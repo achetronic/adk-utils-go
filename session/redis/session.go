@@ -160,7 +160,7 @@ func (s *RedisSessionService) Get(ctx context.Context, req *session.GetRequest) 
 	data, err := s.client.Get(ctx, key).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			return nil, fmt.Errorf("session not found: %s", req.SessionID)
+			return nil, fmt.Errorf("%w: %q", session.ErrNotFound, req.SessionID)
 		}
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
@@ -334,6 +334,15 @@ func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Sess
 
 	trimTempStateDelta(evt)
 
+	key := s.sessionKey(sess.AppName(), sess.UserID(), sess.ID())
+	sessData, err := s.client.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return fmt.Errorf("%w: %q, cannot apply event", session.ErrNotFound, sess.ID())
+		}
+		return fmt.Errorf("failed to get session for update: %w", err)
+	}
+
 	data, err := json.Marshal(evt)
 	if err != nil {
 		return fmt.Errorf("failed to marshal event: %w", err)
@@ -344,12 +353,6 @@ func (s *RedisSessionService) AppendEvent(ctx context.Context, sess session.Sess
 		return fmt.Errorf("failed to append event: %w", err)
 	}
 	s.client.Expire(ctx, eventsKey, s.ttl)
-
-	key := s.sessionKey(sess.AppName(), sess.UserID(), sess.ID())
-	sessData, err := s.client.Get(ctx, key).Bytes()
-	if err != nil {
-		return fmt.Errorf("failed to get session for update: %w", err)
-	}
 
 	var storable storableSession
 	if err := json.Unmarshal(sessData, &storable); err != nil {
