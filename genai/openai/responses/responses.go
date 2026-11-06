@@ -945,9 +945,13 @@ func convertContentToInputItems(content *genai.Content, origin string, dangling 
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)
 			}
-			items = append(items, responses.ResponseInputItemParamOfFunctionCallOutput(
-				part.FunctionResponse.ID, string(responseJSON),
-			))
+			output := responses.ResponseInputItemParamOfFunctionCallOutput(string(responseJSON))
+			// ADK events may carry a function response without an ID
+			// (output IDs are optional); only set call_id when we have one.
+			if part.FunctionResponse.ID != "" {
+				output.OfFunctionCallOutput.CallID = param.NewOpt(part.FunctionResponse.ID)
+			}
+			items = append(items, output)
 
 		case part.FunctionCall != nil:
 			if common.IsADKInternalCall(part.FunctionCall.Name) {

@@ -72,7 +72,7 @@ func TestConvertContentToInputItems_DropsADKConfirmationParts(t *testing.T) {
 	if items[0].OfFunctionCallOutput == nil {
 		t.Fatalf("expected a function call output item, got %+v", items[0])
 	}
-	if got := items[0].OfFunctionCallOutput.CallID; got != "call_real" {
+	if got := items[0].OfFunctionCallOutput.CallID.Value; got != "call_real" {
 		t.Errorf("remaining output CallID = %q, want %q", got, "call_real")
 	}
 }
