@@ -14,8 +14,8 @@ Agent guidelines for working in the `adk-utils-go` repository.
 A Go library providing utilities for Google's Agent Development Kit (ADK). This library extends ADK with additional backend implementations for topics like session management or memory services.
 
 **Module**: `github.com/achetronic/adk-utils-go` (see `go.mod`)  
-**Go Version**: 1.24.9+ (toolchain 1.25.5)  
-**ADK Version**: v1.4.0
+**Go Version**: 1.26.10  
+**ADK Version**: v2.7.1
 
 ### Key Dependencies
 
