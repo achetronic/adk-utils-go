@@ -125,6 +125,10 @@ type Config struct {
 	// request headers.
 	HTTPOptions HTTPOptions
 
+	// Options groups non-HTTP SDK request options: retry count and delay.
+	// The zero value leaves every knob at the SDK default.
+	Options common.Options
+
 	// DisablePromptCaching turns OFF the cache_control breakpoints the
 	// adapter stamps on every request (see caching.go). Caching is on
 	// by default because it only ever lowers the bill: requests whose
@@ -146,6 +150,9 @@ func New(cfg Config) *Model {
 	}
 	if cfg.HTTPOptions.Client != nil {
 		opts = append(opts, option.WithHTTPClient(cfg.HTTPOptions.Client))
+	}
+	if retries, ok := cfg.Options.ResolveMaxRetries(); ok {
+		opts = append(opts, option.WithMaxRetries(retries))
 	}
 	for k, vals := range cfg.HTTPOptions.Headers {
 		for _, v := range vals {

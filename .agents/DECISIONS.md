@@ -166,6 +166,20 @@ Schema validation only catches structural errors, not Anthropic's cross-message
 rules (tool_use needs a following tool_result); step B is the only guard for
 those.
 
+### D7 - Non-HTTP request options live on `Config.Options`
+
+Both SDKs retry twice silently, so one timeout becomes three attempts.
+
+- `HTTPOptions` stays transport (`Client`, `Headers`). The rest goes on a
+  top-level `Config.Options` (`common.Options`, shared by the three adapters).
+- `MaxRetries *int`: nil = default (2), 0 = one attempt, negative clamps to 0.
+- `MaxRetryDelay *time.Duration`: nil/<=0 = default; OpenAI only, the Anthropic
+  SDK has no such knob and ignores it.
+- Pointers distinguish unset from 0, since the SDK defaults are non-zero.
+- Clamping lives on `ResolveMaxRetries` / `ResolveMaxRetryDelay`, so the three
+  adapters stay identical.
+- No timeout knob: `http.Client{Timeout}` on `HTTPOptions.Client` covers it.
+
 ---
 
 ## OpenAI adapter (`genai/openai/completions`)

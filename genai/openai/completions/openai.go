@@ -89,6 +89,9 @@ type Config struct {
 	ModelName string
 	// HTTPOptions holds optional HTTP-level overrides (e.g. extra headers).
 	HTTPOptions HTTPOptions
+	// Options groups non-HTTP SDK request options: retry count and delay.
+	// The zero value leaves every knob at the SDK default.
+	Options common.Options
 	// Dialect layers provider-specific wire behaviour onto the adapter:
 	// reasoning fields on ingest and egress, tool_call_id shapes, usage
 	// buckets outside the standard object, and a last pass over the request
@@ -136,6 +139,12 @@ func New(cfg Config) *Model {
 	}
 	if cfg.HTTPOptions.Client != nil {
 		opts = append(opts, option.WithHTTPClient(cfg.HTTPOptions.Client))
+	}
+	if retries, ok := cfg.Options.ResolveMaxRetries(); ok {
+		opts = append(opts, option.WithMaxRetries(retries))
+	}
+	if delay, ok := cfg.Options.ResolveMaxRetryDelay(); ok {
+		opts = append(opts, option.WithMaxRetryDelay(delay))
 	}
 	for k, vals := range cfg.HTTPOptions.Headers {
 		for _, v := range vals {
