@@ -5,6 +5,10 @@ package langfuse
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -93,6 +97,66 @@ func TestSetupAppliesTracerProviderOptions(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	_ = shutdown(cancelled)
+}
+
+// TestSetupSendsV4IngestionHeader verifies the OTLP exporter declares the
+// Langfuse v4 ingestion version. Without the header a v4 deployment running
+// the v3 -> v4 migration can route the spans through the delayed dual-write
+// staging pipeline instead of writing them to the observations table.
+func TestSetupSendsV4IngestionHeader(t *testing.T) {
+	prev := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(prev)
+
+	var (
+		mu       sync.Mutex
+		received bool
+		path     string
+		auth     string
+		version  string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received = true
+		path = r.URL.Path
+		auth = r.Header.Get("Authorization")
+		version = r.Header.Get(ingestionVersionHeader)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		PublicKey: "pk-test",
+		SecretKey: "sk-test",
+		Host:      srv.URL,
+		Insecure:  true,
+	}
+	_, shutdown, err := Setup(cfg)
+	if err != nil {
+		t.Fatalf("Setup returned error: %v", err)
+	}
+
+	_, span := otel.Tracer("setup-test").Start(context.Background(), "probe")
+	span.End()
+	if err := shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !received {
+		t.Fatal("no spans reached the Langfuse endpoint")
+	}
+	if path != "/api/public/otel/v1/traces" {
+		t.Errorf("export path = %q, want %q", path, "/api/public/otel/v1/traces")
+	}
+	if !strings.HasPrefix(auth, "Basic ") {
+		t.Errorf("Authorization header = %q, want a Basic credential", auth)
+	}
+	if version != ingestionVersionV4 {
+		t.Errorf("%s header = %q, want %q", ingestionVersionHeader, version, ingestionVersionV4)
+	}
 }
 
 // TestSetupWithoutTracerProviderOptions guards the default path: an empty

@@ -48,6 +48,17 @@ const defaultHost = "https://cloud.langfuse.com"
 // is not provided.
 const defaultServiceName = "langfuse-adk"
 
+// ingestionVersionHeader selects the Langfuse ingestion model the exporter
+// writes to. Langfuse reads it from every OTLP request.
+const ingestionVersionHeader = "x-langfuse-ingestion-version"
+
+// ingestionVersionV4 is the ingestion model Langfuse v4 reads from OTLP
+// directly. Sending it keeps spans on the observations-first data model: a
+// server running the v3 -> v4 migration otherwise routes OTLP spans through
+// the dual-write staging pipeline, which can delay them by several minutes.
+// Langfuse v3 servers ignore the header, so it is safe to send to both.
+const ingestionVersionV4 = "4"
+
 // Setup initialises the full Langfuse integration: an OTLP/HTTP trace exporter
 // pointed at the Langfuse ingestion endpoint, an enriching span exporter that
 // injects LLM request/response payloads, and an ADK plugin that captures them.
@@ -83,7 +94,8 @@ func Setup(cfg *Config) (runner.PluginConfig, func(context.Context) error, error
 	exporterOpts := []otlptracehttp.Option{
 		otlptracehttp.WithEndpointURL(fmt.Sprintf("%s/api/public/otel/v1/traces", host)),
 		otlptracehttp.WithHeaders(map[string]string{
-			"Authorization": "Basic " + auth,
+			"Authorization":        "Basic " + auth,
+			ingestionVersionHeader: ingestionVersionV4,
 		}),
 	}
 	if cfg.Insecure {

@@ -357,6 +357,8 @@ Artifacts are stored at `{BasePath}/{appName}/{userID}/{sessionID}/{fileName}/{v
 
 Traces every agent invocation and LLM call to [Langfuse](https://langfuse.com) via OTLP/HTTP. Enriches `generate_content` spans with full request/response payloads and token usage so Langfuse can display costs, latency, and prompt/completion content.
 
+Every OTLP request declares the Langfuse v4 ingestion version (`x-langfuse-ingestion-version: 4`), so spans are written straight to the observations-first v4 data model instead of the delayed dual-write pipeline a migrating v3 -> v4 server would otherwise use. Langfuse v3 ignores the header, so the same exporter works against either version.
+
 Supports all ADK agent topologies: single agents, sequential delegation, SequentialAgent, LoopAgent, and ParallelAgent.
 
 ### Setup
